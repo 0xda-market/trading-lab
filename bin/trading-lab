@@ -5,30 +5,55 @@
 require "json"
 require "optparse"
 require_relative "../lib/zero_x_da/trading_lab/replay"
+require_relative "../lib/zero_x_da/trading_lab/okx_lead_traders"
 
-options = {}
-parser = OptionParser.new do |p|
-  p.banner = "Usage: trading-lab replay PATH [options]"
-  { "starting-cash" => "starting_cash", "trade-notional" => "trade_notional", "fee-bps" => "fee_bps",
-    "slippage-bps" => "slippage_bps", "max-allocation" => "max_allocation" }.each do |flag, key|
-    p.on("--#{flag} VALUE") { |value| options[key] = value }
+def replay(argv)
+  options = {}
+  parser = OptionParser.new do |p|
+    p.banner = "Usage: trading-lab replay PATH [options]"
+    { "starting-cash" => "starting_cash", "trade-notional" => "trade_notional", "fee-bps" => "fee_bps",
+      "slippage-bps" => "slippage_bps", "max-allocation" => "max_allocation" }.each do |flag, key|
+      p.on("--#{flag} VALUE") { |value| options[key] = value }
+    end
+    p.on("--max-delay-seconds INTEGER", Integer) { |value| options["max_delay_seconds"] = value }
   end
-  p.on("--max-delay-seconds INTEGER", Integer) { |value| options["max_delay_seconds"] = value }
-end
-
-begin
-  raise ArgumentError, "expected replay PATH" unless ARGV.shift == "replay"
-  parser.parse!(ARGV)
-  raise ArgumentError, "expected one JSONL path" unless ARGV.length == 1
+  parser.parse!(argv)
+  raise ArgumentError, "expected one JSONL path" unless argv.length == 1
   events = []
-  File.foreach(ARGV.first).each_with_index do |line, index|
+  File.foreach(argv.first).each_with_index do |line, index|
     next if line.strip.empty?
     record = JSON.parse(line)
     raise ArgumentError, "line #{index + 1}: expected an object" unless record.is_a?(Hash)
     events << record
   end
   puts JSON.pretty_generate(ZeroXDA::TradingLab::Replay.call(events, options))
-rescue ArgumentError, JSON::ParserError, Errno::ENOENT => error
-  warn "replay error: #{error.message}"
+end
+
+# Read-only: fetches the public OKX lead trader leaderboard once, without credentials.
+def okx_leaders(argv)
+  options = {}
+  parser = OptionParser.new do |p|
+    p.banner = "Usage: trading-lab okx-leaders [options]"
+    %w[sort state min-lead-days min-assets max-assets min-aum max-aum data-version page limit].each do |flag|
+      p.on("--#{flag} VALUE") { |value| options[flag.tr("-", "_")] = value }
+    end
+  end
+  parser.parse!(argv)
+  raise ArgumentError, "unexpected arguments" unless argv.empty?
+  puts JSON.pretty_generate(ZeroXDA::TradingLab::OkxLeadTraders.new.ranks(options))
+end
+
+command = ARGV.shift
+begin
+  case command
+  when "replay" then replay(ARGV)
+  when "okx-leaders" then okx_leaders(ARGV)
+  else raise ArgumentError, "expected replay PATH or okx-leaders"
+  end
+rescue ArgumentError, OptionParser::ParseError, JSON::ParserError, Errno::ENOENT => error
+  warn "#{command || 'trading-lab'} error: #{error.message}"
   exit 2
+rescue ZeroXDA::TradingLab::OkxLeadTraders::Error => error
+  warn "okx error: #{error.message}"
+  exit 3
 end
