@@ -14,7 +14,8 @@ class OkxLeadTradersTest < Minitest::Test
       requests << uri
       [status, body]
     end
-    ZeroXDA::TradingLab::OkxLeadTraders.new(transport: transport, clock: clock, sleeper: ->(seconds) { sleeps << seconds })
+    ZeroXDA::TradingLab::OkxLeadTraders.new(transport: transport, clock: clock, sleeper: ->(seconds) { sleeps << seconds },
+                                            throttle: { lock: Mutex.new, last_request_at: nil })
   end
 
   def test_normalizes_documented_example
@@ -23,6 +24,7 @@ class OkxLeadTradersTest < Minitest::Test
     assert_equal "20231129213200", result["data_version"]
     assert_equal 1, result["page"]
     assert_equal 1, result["total_pages"]
+    assert_equal 10, result["limit"]
     trader = result["traders"].fetch(0)
     assert_equal "540D011FDACCB47A", trader["unique_code"]
     assert_equal "Crypto to the moon", trader["nickname"]
@@ -31,6 +33,7 @@ class OkxLeadTradersTest < Minitest::Test
     assert_equal "0.6957", trader["win_ratio"]
     assert_equal 156, trader["lead_days"]
     assert_equal 999, trader["copy_traders"]
+    assert_equal "0", trader["copy_state"]
     assert trader["has_vacancy"]
     assert_equal %w[ICP-USDT-SWAP MINA-USDT-SWAP], trader["instruments"]
     assert_equal [{ "begin_at" => "2023-11-28T16:00:00.000Z", "pnl_ratio" => "1.6744" },
@@ -78,6 +81,29 @@ class OkxLeadTradersTest < Minitest::Test
     document = JSON.parse(FIXTURE)
     document["data"][0]["ranks"][0]["uniqueCode"] = "../../x"
     assert_raises(error) { client(body: JSON.generate(document)).ranks }
+  end
+
+  def test_full_trader_has_no_vacancy
+    document = JSON.parse(FIXTURE)
+    document["data"][0]["ranks"][0]["copyTraderNum"] = "1000"
+    refute client(body: JSON.generate(document)).ranks["traders"][0]["has_vacancy"]
+  end
+
+  def test_rejects_substituted_data_version
+    error = assert_raises(ZeroXDA::TradingLab::OkxLeadTraders::Error) { client.ranks(data_version: "20231129212200") }
+    assert_match(/no longer available/, error.message)
+    assert_equal "20231129213200", client.ranks(data_version: "20231129213200")["data_version"]
+  end
+
+  def test_shared_throttle_across_instances
+    sleeps = []
+    shared = { lock: Mutex.new, last_request_at: nil }
+    times = [5.0, 5.0]
+    2.times do
+      ZeroXDA::TradingLab::OkxLeadTraders.new(transport: ->(_) { [200, FIXTURE] }, clock: -> { times.shift },
+                                              sleeper: ->(s) { sleeps << s }, throttle: shared).ranks
+    end
+    assert_equal [0.4], sleeps
   end
 
   def test_preserves_upstream_rank_order

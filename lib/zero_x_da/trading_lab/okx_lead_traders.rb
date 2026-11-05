@@ -27,6 +27,8 @@ module ZeroXDA
       MIN_LEAD_DAYS = { 7 => "1", 30 => "2", 90 => "3", 180 => "4" }.freeze
       OPTIONS = %w[sort state min_lead_days min_assets max_assets min_aum max_aum data_version page limit].freeze
       UNIQUE_CODE = /\A(?:[0-9A-Za-z]{16}|[0-9]{18})\z/
+      # The documented limit is per IP, so instances share one throttle by default.
+      SHARED_THROTTLE = { lock: Mutex.new, last_request_at: nil }
 
       NETWORK_ERRORS = [SocketError, SystemCallError, Timeout::Error, OpenSSL::SSL::SSLError, Net::HTTPBadResponse, EOFError].freeze
 
@@ -42,19 +44,25 @@ module ZeroXDA
             request = Net::HTTP::Get.new(uri)
             request["accept"] = "application/json"
             request["user-agent"] = "0xda-trading-lab"
-            response = http.request(request)
-            [response.code.to_i, response.body.to_s]
+            http.request(request) do |response|
+              body = +""
+              response.read_body do |chunk|
+                body << chunk
+                raise Error, "OKX response is too large" if body.bytesize > MAX_BODY_BYTES
+              end
+              return [response.code.to_i, body]
+            end
           end
         rescue *NETWORK_ERRORS => error
           raise Error, "OKX request failed: #{error.class}"
         end
       end
 
-      def initialize(transport: self.class.default_transport, clock: -> { Process.clock_gettime(Process::CLOCK_MONOTONIC) }, sleeper: ->(seconds) { sleep(seconds) })
+      def initialize(transport: self.class.default_transport, clock: -> { Process.clock_gettime(Process::CLOCK_MONOTONIC) }, sleeper: ->(seconds) { sleep(seconds) }, throttle: SHARED_THROTTLE)
         @transport = transport
         @clock = clock
         @sleeper = sleeper
-        @last_request_at = nil
+        @throttle = throttle
       end
 
       def ranks(options = {})
@@ -64,7 +72,7 @@ module ZeroXDA
         status, body = @transport.call(uri)
         raise RateLimited, "OKX rate limit reached" if status == 429
         raise Error, "OKX responded with HTTP #{status}" unless status == 200
-        raise Error, "OKX response is too large" if body.bytesize > MAX_BODY_BYTES
+        raise Error, "OKX response is too large" if body.bytesize > MAX_BODY_BYTES # injected transports
         normalize(JSON.parse(body), query)
       rescue JSON::ParserError
         raise Error, "OKX response is not JSON"
@@ -111,15 +119,18 @@ module ZeroXDA
       end
 
       def throttle
-        now = @clock.call
-        if @last_request_at
-          wait = MIN_INTERVAL_SECONDS - (now - @last_request_at)
-          if wait.positive?
-            @sleeper.call(wait)
-            now += wait
+        @throttle[:lock].synchronize do
+          now = @clock.call
+          last = @throttle[:last_request_at]
+          if last
+            wait = MIN_INTERVAL_SECONDS - (now - last)
+            if wait.positive?
+              @sleeper.call(wait)
+              now += wait
+            end
           end
+          @throttle[:last_request_at] = now
         end
-        @last_request_at = now
       end
 
       def normalize(document, query)
@@ -132,13 +143,19 @@ module ZeroXDA
         page = pages.first
         ranks = page["ranks"]
         raise Error, "OKX response has no ranks" unless ranks.is_a?(Array)
+        version = field(page, "dataVer", /\A\d{14}\z/)
+        # OKX silently serves the latest snapshot for an unknown dataVer; never mix snapshots.
+        if query.key?("dataVer") && version != query["dataVer"]
+          raise Error, "OKX data version #{query['dataVer']} is no longer available (got #{version})"
+        end
         {
           "source" => "okx",
           "endpoint" => PATH,
           "instrument_type" => query["instType"],
           "sort" => query.fetch("sortType", "overview"),
-          "data_version" => field(page, "dataVer", /\A\d{14}\z/),
+          "data_version" => version,
           "page" => Integer(query.fetch("page", "1")),
+          "limit" => Integer(query.fetch("limit", "10")),
           "total_pages" => count(page, "totalPage"),
           "traders" => ranks.map { |rank| trader(rank) }
         }
@@ -165,6 +182,9 @@ module ZeroXDA
           "copy_traders" => copy_traders,
           "max_copy_traders" => max_copy_traders,
           "accumulated_copy_traders" => count(rank, "accCopyTraderNum"),
+          # Raw OKX copyState: "0" non-copy, "1" copy. Not the same fact as vacancy.
+          "copy_state" => field(rank, "copyState", /\A[01]\z/),
+          # Derived from the two counts, matching the state=1 "has vacancy" filter.
           "has_vacancy" => copy_traders < max_copy_traders,
           "instruments" => instruments,
           "daily_pnl_ratios" => ratios.map do |ratio|
