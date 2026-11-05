@@ -54,7 +54,19 @@ The client waits at least 0.4 s between requests (documented limit: 5 requests p
 `RateLimited` on HTTP 429 or OKX code `50011`. PnL and ratios cover the last 90 days, so a leaderboard
 rank is survivorship-biased and is not a recommendation to copy anyone.
 
-The service does not call OKX yet; HTTP exposure is a separate change.
+### Private leaderboard API
+
+```sh
+curl 'http://127.0.0.1:9293/v1/leaders/okx?sort=pnl_ratio&min_lead_days=90&limit=20' \
+  -H 'Authorization: Bearer local-test-only'
+```
+
+`GET /v1/leaders/okx` takes the same options as the CLI as query parameters and returns
+`{"status":"ok","data":{...}}` with the normalized page. It uses the same service token as replays.
+Invalid or duplicate parameters return 422 before any OKX call; a query over 512 bytes returns 414.
+Successful pages are cached in memory for 60 seconds (at most 64 queries) so Mini App traffic stays
+under the OKX limit; failures are not cached. OKX rate limiting returns 503 `upstream_rate_limited`,
+other upstream failures return 502 `upstream_unavailable`.
 
 © 2026 aiaiaiai · aiaiaiai.org
 
