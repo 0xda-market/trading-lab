@@ -22,17 +22,17 @@ jobs:
     outputs:
       image: ${{ steps.immutable.outputs.image }}
     steps:
-      - name: Gate manual deployment on exact main Full CI
+      - name: Gate manual deployment on exact master Full CI
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -Eeuo pipefail
-          test "$GITHUB_REF" = refs/heads/main || { echo "::error::Only main can be deployed." >&2; exit 1; }
+          test "$GITHUB_REF" = refs/heads/master || { echo "::error::Only master can be deployed." >&2; exit 1; }
           runs="$(gh api --method GET "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?event=push&head_sha=$GITHUB_SHA&per_page=100")"
           jq -e --arg sha "$GITHUB_SHA" '
-            [.workflow_runs[] | select(.head_sha == $sha and .head_branch == "main"
+            [.workflow_runs[] | select(.head_sha == $sha and .head_branch == "master"
               and .status == "completed" and .conclusion == "success")] | length > 0
-          ' <<< "$runs" >/dev/null || { echo "::error::Successful main push Full CI required for this SHA." >&2; exit 1; }
+          ' <<< "$runs" >/dev/null || { echo "::error::Successful master push Full CI required for this SHA." >&2; exit 1; }
 
       - uses: actions/checkout@v4
         with:
@@ -52,7 +52,7 @@ jobs:
           context: .
           push: true
           platforms: linux/amd64
-          tags: ghcr.io/0x0sky/trading-lab:production-${{ github.sha }}
+          tags: ghcr.io/0xda-market/trading-lab:production-${{ github.sha }}
 
       - name: Extract immutable image digest
         id: immutable
@@ -61,7 +61,7 @@ jobs:
         run: |
           set -Eeuo pipefail
           [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || exit 1
-          echo "image=ghcr.io/0x0sky/trading-lab@$DIGEST" >> "$GITHUB_OUTPUT"
+          echo "image=ghcr.io/0xda-market/trading-lab@$DIGEST" >> "$GITHUB_OUTPUT"
 
   request:
     needs: package
@@ -80,8 +80,8 @@ jobs:
           SERVICE_TOKEN: ${{ secrets.TRADING_LAB_SERVICE_TOKEN }}
         run: |
           set -Eeuo pipefail
-          test "$GITHUB_REF" = refs/heads/main
-          [[ "$IMAGE_REF" =~ ^ghcr[.]io/0x0sky/trading-lab@sha256:[0-9a-f]{64}$ ]]
+          test "$GITHUB_REF" = refs/heads/master
+          [[ "$IMAGE_REF" =~ ^ghcr[.]io/0xda-market/trading-lab@sha256:[0-9a-f]{64}$ ]]
           test -n "$GH_TOKEN" || { echo "::error::Missing INFRA_DEPLOY_TOKEN." >&2; exit 1; }
           test -n "$SERVICE_TOKEN" || { echo "::error::Missing TRADING_LAB_SERVICE_TOKEN." >&2; exit 1; }
           [[ "$SERVICE_TOKEN" != *$'\n'* && "$SERVICE_TOKEN" != *$'\r'* ]] || exit 1
