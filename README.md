@@ -37,6 +37,25 @@ The Telegram bot validates Telegram `initData` and resolves the actor using the 
 
 The paper engine is isolated from the marketplace checkout, broker liquidity, payments and settlement ledger. Exchange collectors must remain read-only and explicitly user-authorized before running. Former Python Binance collector PR #2 was closed without merge; its read-only collector contract must be ported to Ruby in a separate PR.
 
+## OKX lead trader leaderboard (read-only)
+
+The copytrading research starts from a leaderboard. `OkxLeadTraders` reads the public OKX endpoint
+[`GET /api/v5/copytrading/public-lead-traders`](https://www.okx.com/docs-v5/en/#order-book-trading-copy-trading-get-lead-trader-ranks):
+no API key, no signature, no order placement.
+
+```sh
+bundle exec ruby bin/trading-lab okx-leaders --sort pnl_ratio --min-lead-days 90 --limit 20
+```
+
+Options: `sort` (`overview`, `pnl`, `aum`, `win_ratio`, `pnl_ratio`, `current_copy_trader_pnl`), `state` (`all`, `vacancy`),
+`min_lead_days` (7, 30, 90, 180), `min_assets`/`max_assets`/`min_aum`/`max_aum` in whole USDT (min ≤ max), `data_version` (14 digits),
+`page`, `limit` (1–20). `has_capacity` only compares copy trader counts and does not mean the trader can be copied; eligibility stays unknown. Decimals stay strings; OKX rank order is preserved; the portrait link is dropped.
+The client waits at least 0.4 s between requests (documented limit: 5 requests per 2 s per IP) and raises
+`RateLimited` on HTTP 429 or OKX code `50011`. PnL and ratios cover the last 90 days, so a leaderboard
+rank is survivorship-biased and is not a recommendation to copy anyone.
+
+The service does not call OKX yet; HTTP exposure is a separate change.
+
 © 2026 aiaiaiai · aiaiaiai.org
 
 ## Deployment via infra
