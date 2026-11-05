@@ -48,8 +48,8 @@ bundle exec ruby bin/trading-lab okx-leaders --sort pnl_ratio --min-lead-days 90
 ```
 
 Options: `sort` (`overview`, `pnl`, `aum`, `win_ratio`, `pnl_ratio`, `current_copy_trader_pnl`), `state` (`all`, `vacancy`),
-`min_lead_days` (7, 30, 90, 180), `min_assets`/`max_assets`/`min_aum`/`max_aum` in USDT, `data_version` (14 digits),
-`page`, `limit` (1–20). Decimals stay strings; OKX rank order is preserved; the portrait link is dropped.
+`min_lead_days` (7, 30, 90, 180), `min_assets`/`max_assets`/`min_aum`/`max_aum` in whole USDT (min ≤ max), `data_version` (14 digits),
+`page`, `limit` (1–20). `has_capacity` only compares copy trader counts and does not mean the trader can be copied; eligibility stays unknown. Decimals stay strings; OKX rank order is preserved; the portrait link is dropped.
 The client waits at least 0.4 s between requests (documented limit: 5 requests per 2 s per IP) and raises
 `RateLimited` on HTTP 429 or OKX code `50011`. PnL and ratios cover the last 90 days, so a leaderboard
 rank is survivorship-biased and is not a recommendation to copy anyone.

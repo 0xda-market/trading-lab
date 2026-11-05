@@ -37,7 +37,7 @@ module ZeroXDA
         lambda do |uri|
           proxy = uri.find_proxy
           http = Net::HTTP.new(uri.host, uri.port, proxy&.host, proxy&.port, proxy&.user, proxy&.password)
-          http.use_ssl = true
+          http.use_ssl = uri.scheme == "https"
           http.open_timeout = 5
           http.read_timeout = 10
           http.start do
@@ -58,7 +58,8 @@ module ZeroXDA
         end
       end
 
-      def initialize(transport: self.class.default_transport, clock: -> { Process.clock_gettime(Process::CLOCK_MONOTONIC) }, sleeper: ->(seconds) { sleep(seconds) }, throttle: SHARED_THROTTLE)
+      def initialize(transport: self.class.default_transport, clock: -> { Process.clock_gettime(Process::CLOCK_MONOTONIC) }, sleeper: ->(seconds) { sleep(seconds) }, throttle: SHARED_THROTTLE, origin: ORIGIN)
+        @origin = origin
         @transport = transport
         @clock = clock
         @sleeper = sleeper
@@ -67,7 +68,7 @@ module ZeroXDA
 
       def ranks(options = {})
         query = query_for(options)
-        uri = URI("#{ORIGIN}#{PATH}?#{URI.encode_www_form(query)}")
+        uri = URI("#{@origin}#{PATH}?#{URI.encode_www_form(query)}")
         throttle
         status, body = @transport.call(uri)
         raise RateLimited, "OKX rate limit reached" if status == 429
@@ -100,6 +101,10 @@ module ZeroXDA
         end
         { "min_assets" => "minAssets", "max_assets" => "maxAssets", "min_aum" => "minAum", "max_aum" => "maxAum" }.each do |key, param|
           query[param] = amount(options[key], key) if options.key?(key)
+        end
+        [%w[minAssets maxAssets], %w[minAum maxAum]].each do |low, high|
+          next unless query.key?(low) && query.key?(high)
+          raise ArgumentError, "#{low} must not exceed #{high}" if BigDecimal(query[low]) > BigDecimal(query[high])
         end
         if options.key?("data_version")
           raise ArgumentError, "data_version must be 14 digits" unless /\A\d{14}\z/.match?(options["data_version"].to_s)
@@ -184,8 +189,9 @@ module ZeroXDA
           "accumulated_copy_traders" => count(rank, "accCopyTraderNum"),
           # Raw OKX copyState: "0" non-copy, "1" copy. Not the same fact as vacancy.
           "copy_state" => field(rank, "copyState", /\A[01]\z/),
-          # Derived from the two counts, matching the state=1 "has vacancy" filter.
-          "has_vacancy" => copy_traders < max_copy_traders,
+          # Numerical capacity only (copyTraderNum < maxCopyTraderNum). It does not prove
+          # the trader is eligible to be copied; OKX documents no such field here.
+          "has_capacity" => copy_traders < max_copy_traders,
           "instruments" => instruments,
           "daily_pnl_ratios" => ratios.map do |ratio|
             { "begin_at" => millis(ratio, "beginTs"), "pnl_ratio" => decimal(ratio, "pnlRatio") }
@@ -219,9 +225,9 @@ module ZeroXDA
       end
 
       def amount(value, name)
-        number = BigDecimal(value.to_s, exception: false)
-        raise ArgumentError, "#{name} must be a finite non-negative number" unless number&.finite? && number >= 0
-        number.to_s("F")
+        # OKX rejects decimal notation here ("10.0" -> code 51000), so only whole USDT.
+        raise ArgumentError, "#{name} must be a whole non-negative USDT amount" unless /\A\d{1,15}\z/.match?(value.to_s)
+        Integer(value.to_s, 10).to_s
       end
     end
   end

@@ -34,7 +34,8 @@ class OkxLeadTradersTest < Minitest::Test
     assert_equal 156, trader["lead_days"]
     assert_equal 999, trader["copy_traders"]
     assert_equal "0", trader["copy_state"]
-    assert trader["has_vacancy"]
+    assert trader["has_capacity"]
+    refute trader.key?("has_vacancy")
     assert_equal %w[ICP-USDT-SWAP MINA-USDT-SWAP], trader["instruments"]
     assert_equal [{ "begin_at" => "2023-11-28T16:00:00.000Z", "pnl_ratio" => "1.6744" },
                   { "begin_at" => "2023-11-23T16:00:00.000Z", "pnl_ratio" => "1.649" }], trader["daily_pnl_ratios"]
@@ -49,7 +50,7 @@ class OkxLeadTradersTest < Minitest::Test
     assert_equal "https", uri.scheme
     assert_equal "www.okx.com", uri.host
     assert_equal "/api/v5/copytrading/public-lead-traders", uri.path
-    assert_equal({ "instType" => "SWAP", "sortType" => "pnl_ratio", "state" => "1", "minLeadDays" => "3", "minAum" => "1000.0",
+    assert_equal({ "instType" => "SWAP", "sortType" => "pnl_ratio", "state" => "1", "minLeadDays" => "3", "minAum" => "1000",
                    "dataVer" => "20231129213200", "page" => "2", "limit" => "20" }, URI.decode_www_form(uri.query).to_h)
   end
 
@@ -57,7 +58,7 @@ class OkxLeadTradersTest < Minitest::Test
     requests = []
     api = client(requests: requests)
     [{ "sort" => "luck" }, { "limit" => 21 }, { "limit" => 0 }, { "page" => 0 }, { "min_lead_days" => 14 },
-     { "state" => "open" }, { "min_aum" => "-1" }, { "max_assets" => "Infinity" }, { "data_version" => "2023" },
+     { "state" => "open" }, { "min_aum" => "-1" }, { "max_assets" => "Infinity" }, { "min_aum" => "10.5" }, { "min_assets" => "1e3" }, { "data_version" => "2023" },
      { "api_key" => "x" }].each do |options|
       assert_raises(ArgumentError, options.inspect) { api.ranks(options) }
     end
@@ -83,10 +84,27 @@ class OkxLeadTradersTest < Minitest::Test
     assert_raises(error) { client(body: JSON.generate(document)).ranks }
   end
 
-  def test_full_trader_has_no_vacancy
+  def test_capacity_is_not_copy_eligibility
+    trader = client.ranks["traders"][0]
+    assert_equal "0", trader["copy_state"]
+    assert trader["has_capacity"]
+    refute trader.keys.any? { |key| key.match?(/eligib|vacancy|copyable/) }
+  end
+
+  def test_rejects_contradictory_bounds_before_request
+    requests = []
+    api = client(requests: requests)
+    assert_raises(ArgumentError) { api.ranks(min_assets: "100", max_assets: "99.9") }
+    assert_raises(ArgumentError) { api.ranks(min_aum: "5000", max_aum: "10") }
+    assert_empty requests
+    api.ranks(min_aum: "10", max_aum: "10")
+    assert_equal 1, requests.size
+  end
+
+  def test_full_trader_has_no_capacity
     document = JSON.parse(FIXTURE)
     document["data"][0]["ranks"][0]["copyTraderNum"] = "1000"
-    refute client(body: JSON.generate(document)).ranks["traders"][0]["has_vacancy"]
+    refute client(body: JSON.generate(document)).ranks["traders"][0]["has_capacity"]
   end
 
   def test_rejects_substituted_data_version
@@ -104,6 +122,21 @@ class OkxLeadTradersTest < Minitest::Test
                                               sleeper: ->(s) { sleeps << s }, throttle: shared).ranks
     end
     assert_equal [0.4], sleeps
+  end
+
+  def test_concurrent_calls_share_one_throttle
+    shared = { lock: Mutex.new, last_request_at: nil }
+    sleeps = Queue.new
+    threads = 4.times.map do
+      Thread.new do
+        ZeroXDA::TradingLab::OkxLeadTraders.new(transport: ->(_) { [200, FIXTURE] }, clock: -> { 0.0 },
+                                                sleeper: ->(s) { sleeps << s }, throttle: shared).ranks
+      end
+    end
+    threads.each(&:join)
+    waits = Array.new(sleeps.size) { sleeps.pop }.sort
+    assert_equal [0.4, 0.8, 1.2], waits.map { |w| w.round(10) }
+    assert_in_delta 1.2, shared[:last_request_at], 1e-9
   end
 
   def test_preserves_upstream_rank_order
