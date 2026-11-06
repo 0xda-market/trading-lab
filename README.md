@@ -83,3 +83,12 @@ The canonical repository is [`0xda-market/trading-lab`](https://github.com/0xda-
 - The Telegram bot holds `TRADING_LAB_TOKEN` (equal to the service token) and private variable `TRADING_LAB_ORIGIN=http://market-trading-lab:1927` after its production deployment contract is separately reviewed.
 
 No public DNS, new Telegram credentials, trading API keys, database or live trading are required.
+
+## Development delivery (automatic)
+
+Infra deploys `market-trading-lab-development` (private `http://market-trading-lab-development:1703`, `edge-prod-1`) on its own; this repository holds no infra token.
+
+- After push Full CI passes on `master`, the `publish-development` job in `ci.yml` (Environment `development`) pushes `ghcr.io/0xda-market/trading-lab:<sha>` and the envelope `:<sha>.secrets`, and attests both.
+- The envelope holds only `TRADING_LAB_SERVICE_TOKEN`, encrypted with `age` to `encryptionRecipient` in `aiaiaiai-org/infra` `contracts/servers/edge-prod-1.yaml`.
+- One-time setup: in the package settings, under *Manage Actions access*, give `aiaiaiai-org/infra` **Read**.
+- To rotate the token, change it in the `development` Environment and re-run Full CI for the `master` head.
