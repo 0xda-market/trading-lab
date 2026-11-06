@@ -101,6 +101,21 @@ class OkxLeadTradersTest < Minitest::Test
     assert_equal 1, requests.size
   end
 
+  def test_accepts_okx_scientific_notation_as_plain_decimals
+    document = JSON.parse(FIXTURE)
+    rank = document["data"][0]["ranks"][0]
+    rank["pnlRatios"] = [{ "beginTs" => "1791302400000", "pnlRatio" => "-1.0E-4" },
+                         { "beginTs" => "1786982400000", "pnlRatio" => "1.0E-4" }]
+    rank["winRatio"] = "5.0E-1"
+    trader = client(body: JSON.generate(document)).ranks["traders"][0]
+    assert_equal %w[-0.0001 0.0001], trader["daily_pnl_ratios"].map { |ratio| ratio["pnl_ratio"] }
+    assert_equal "0.5", trader["win_ratio"]
+    ["1E9999", "1.0E", "NaN", "1e-4e2"].each do |bad|
+      rank["pnlRatio"] = bad
+      assert_raises(ZeroXDA::TradingLab::OkxLeadTraders::Error, bad) { client(body: JSON.generate(document)).ranks }
+    end
+  end
+
   def test_full_trader_has_no_capacity
     document = JSON.parse(FIXTURE)
     document["data"][0]["ranks"][0]["copyTraderNum"] = "1000"
