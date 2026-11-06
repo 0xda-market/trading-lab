@@ -70,17 +70,20 @@ other upstream failures return 502 `upstream_unavailable`.
 
 © 2026 aiaiaiai · aiaiaiai.org
 
-## Deployment via infra
+## Production release via infra
 
-The canonical repository is [`0xda-market/trading-lab`](https://github.com/0xda-market/trading-lab); the default branch is `master`. Deployment is **manual-only** (`workflow_dispatch` on `master`) and requires a successful push Full CI for the exact SHA and the infra workload contract owned by `0xda-market/trading-lab`.
+The canonical repository is [`0xda-market/trading-lab`](https://github.com/0xda-market/trading-lab), with default branch `master`. Production is **manual-only** and takes two separate steps. This repository holds no infra token.
 
-- Producer Environment `production` secrets: `TRADING_LAB_SERVICE_TOKEN` and `INFRA_DEPLOY_TOKEN` (fine-grained access to `aiaiaiai-org/infra`: **Contents: read/write** for `repository_dispatch`, **Actions: read** for workflow results).
-- No product SSH secrets; the infra target `edge-prod-1` owns `SSH_*`.
-- Workload: `market-trading-lab`, private Docker alias `market-trading-lab`, `nilx-edge`, port `1927`.
-- HTTP health: `GET /health`; replay requires a bearer token.
-- The producer builds an immutable `ghcr.io/0xda-market/trading-lab@sha256:...` image, obtains the target's public SSH recipient, sends age-encrypted runtime credentials, and waits for the infra health result.
-- Its short-lived `github.token` is transmitted only inside the encrypted credential envelope for GHCR pull, never to the runtime container. A failing infra workflow fails the producer deployment.
-- The Telegram bot holds `TRADING_LAB_TOKEN` (equal to the service token) and private variable `TRADING_LAB_ORIGIN=http://market-trading-lab:1927` after its production deployment contract is separately reviewed.
+1. **Publish.** Run *Publish Trading Lab production release* (`deploy-production.yml`, `workflow_dispatch` on `master`) in Environment `production`. It requires a successful push Full CI for the exact SHA. It then:
+   - pushes and attests `ghcr.io/0xda-market/trading-lab:production-<sha>`;
+   - encrypts `TRADING_LAB_SERVICE_TOKEN` with `age` to the `edge-prod-1` `encryptionRecipient` from `aiaiaiai-org/infra`;
+   - pushes and attests that envelope as `:production-<sha>.secrets`;
+   - prints both digests.
+2. **Activate.** An infra operator runs `aiaiaiai-org/infra` **Deploy workload** with `workload=market-trading-lab`, the printed `image` and the printed `secrets_image`. Infra decrypts the envelope only inside its `edge-prod-1` job, then activates the workload and checks its health.
+
+- Producer Environment `production` holds only `TRADING_LAB_SERVICE_TOKEN`. No product SSH secrets: `edge-prod-1` owns `SSH_*`. The package is public, so infra pulls it without registry credentials.
+- Workload: `market-trading-lab`, private Docker alias `market-trading-lab` on `nilx-edge`, port `1927`, no public route. Health check: `GET /health`. Replay and leaderboard require the bearer token.
+- A production Telegram bot would hold `TRADING_LAB_TOKEN` (equal to the service token) and `TRADING_LAB_ORIGIN=http://market-trading-lab:1927`. That bot wiring is a separate, reviewed change.
 
 No public DNS, new Telegram credentials, trading API keys, database or live trading are required.
 
