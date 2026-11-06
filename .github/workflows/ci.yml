@@ -32,3 +32,105 @@ jobs:
           bundle exec ruby -Itest test/leaders_http_test.rb
       - name: Offline replay smoke
         run: bundle exec ruby bin/trading-lab replay examples/demo.jsonl
+
+  # Automatic development delivery (aiaiaiai-org/infra docs/automatic-delivery.md).
+  # Runs only for a master push whose tests passed above. Infra verifies both
+  # attestations against this workflow, branch and commit before deploying
+  # market-trading-lab-development; this repository holds no infra credential.
+  publish-development:
+    needs: ruby
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment:
+      name: development
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    concurrency:
+      group: trading-lab-publish-development
+      cancel-in-progress: false
+    env:
+      IMAGE: ghcr.io/0xda-market/trading-lab
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Authenticate to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Build and publish the commit image
+        id: image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          tags: ${{ env.IMAGE }}:${{ github.sha }}
+
+      - name: Attest the commit image
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.image.outputs.digest }}
+          push-to-registry: true
+
+      - name: Encrypt the service token to the edge-prod-1 recipient
+        env:
+          TRADING_LAB_SERVICE_TOKEN: ${{ secrets.TRADING_LAB_SERVICE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          umask 077
+          [[ -n "$TRADING_LAB_SERVICE_TOKEN" && "$TRADING_LAB_SERVICE_TOKEN" != *$'\n'* && "$TRADING_LAB_SERVICE_TOKEN" != *$'\r'* ]] || {
+            echo "::error::TRADING_LAB_SERVICE_TOKEN is missing or multiline in the development Environment." >&2
+            exit 1
+          }
+          contract="$(curl -fsSL https://raw.githubusercontent.com/aiaiaiai-org/infra/master/contracts/servers/edge-prod-1.yaml)"
+          recipient="$(sed -n 's/^  encryptionRecipient: //p' <<<"$contract")"
+          [[ "$recipient" =~ ^ssh-ed25519\ [A-Za-z0-9+/]{68}$ ]] || {
+            echo "::error::edge-prod-1 publishes no valid encryptionRecipient." >&2
+            exit 1
+          }
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq age
+          mkdir -p "$RUNNER_TEMP/envelope"
+          printf 'TRADING_LAB_SERVICE_TOKEN=%s\n' "$TRADING_LAB_SERVICE_TOKEN" |
+            age --recipient "$recipient" --output "$RUNNER_TEMP/envelope/secrets.age"
+          test -s "$RUNNER_TEMP/envelope/secrets.age"
+          printf 'FROM scratch\nCOPY secrets.age /secrets.age\n' > "$RUNNER_TEMP/envelope/Dockerfile"
+          echo "ENVELOPE_CONTEXT=$RUNNER_TEMP/envelope" >> "$GITHUB_ENV"
+
+      - name: Publish the secret envelope
+        id: envelope
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ env.ENVELOPE_CONTEXT }}
+          platforms: linux/amd64
+          push: true
+          provenance: false
+          tags: ${{ env.IMAGE }}:${{ github.sha }}.secrets
+
+      - name: Attest the secret envelope
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.envelope.outputs.digest }}
+          push-to-registry: true
+
+      - name: Summary
+        env:
+          IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
+          ENVELOPE_DIGEST: ${{ steps.envelope.outputs.digest }}
+        run: |
+          {
+            echo "Image: $IMAGE@$IMAGE_DIGEST"
+            echo "Envelope: $IMAGE@$ENVELOPE_DIGEST"
+            echo "Infra reconciles market-trading-lab-development from this commit once the package grants aiaiaiai-org/infra Read."
+          } >> "$GITHUB_STEP_SUMMARY"
