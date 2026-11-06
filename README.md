@@ -72,13 +72,13 @@ other upstream failures return 502 `upstream_unavailable`.
 
 ## Deployment via infra
 
-The canonical repository is [`0x0sky/trading-lab`](https://github.com/0x0sky/trading-lab), transferred from the former `0xda-market` owner. Deployment is **manual-only**, after merging Ruby migration [#3](https://github.com/0x0sky/trading-lab/pull/3) and the infra workload contract.
+The canonical repository is [`0xda-market/trading-lab`](https://github.com/0xda-market/trading-lab); the default branch is `master`. Deployment is **manual-only** (`workflow_dispatch` on `master`) and requires a successful push Full CI for the exact SHA and the infra workload contract owned by `0xda-market/trading-lab`.
 
-- Producer Environment `production` secrets: `TRADING_LAB_SERVICE_TOKEN`, `INFRA_DEPLOY_TOKEN`.
+- Producer Environment `production` secrets: `TRADING_LAB_SERVICE_TOKEN` and `INFRA_DEPLOY_TOKEN` (fine-grained access to `aiaiaiai-org/infra`: **Contents: read/write** for `repository_dispatch`, **Actions: read** for workflow results).
 - No product SSH secrets; the infra target `edge-prod-1` owns `SSH_*`.
 - Workload: `market-trading-lab`, private Docker alias `market-trading-lab`, `nilx-edge`, port `1927`.
 - HTTP health: `GET /health`; replay requires a bearer token.
-- The producer builds an immutable `ghcr.io/0x0sky/trading-lab@sha256:...` image, obtains the target's public SSH recipient, sends age-encrypted runtime credentials, and waits for the infra health result.
+- The producer builds an immutable `ghcr.io/0xda-market/trading-lab@sha256:...` image, obtains the target's public SSH recipient, sends age-encrypted runtime credentials, and waits for the infra health result.
 - Its short-lived `github.token` is transmitted only inside the encrypted credential envelope for GHCR pull, never to the runtime container. A failing infra workflow fails the producer deployment.
 - The Telegram bot holds `TRADING_LAB_TOKEN` (equal to the service token) and private variable `TRADING_LAB_ORIGIN=http://market-trading-lab:1927` after its production deployment contract is separately reviewed.
 
