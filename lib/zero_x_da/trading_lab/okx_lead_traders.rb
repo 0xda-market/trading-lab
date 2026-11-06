@@ -209,8 +209,10 @@ module ZeroXDA
         Integer(field(hash, name, /\A\d{1,12}\z/), 10)
       end
 
+      # OKX sends small values in scientific notation (e.g. daily pnlRatio "-1.0E-4"); the
+      # exponent is bounded and the result is normalized to plain decimal notation.
       def decimal(hash, name)
-        value = field(hash, name, /\A-?\d+(?:\.\d+)?\z/)
+        value = field(hash, name, /\A-?\d+(?:\.\d+)?(?:[eE][-+]?\d{1,3})?\z/)
         BigDecimal(value).to_s("F")
       end
 
