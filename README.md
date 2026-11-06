@@ -70,6 +70,25 @@ other upstream failures return 502 `upstream_unavailable`.
 
 © 2026 aiaiaiai · aiaiaiai.org
 
+## Copy a real lead trader (paper)
+
+`POST /v1/paper/copy-replays` with `{"unique_code":"<OKX lead trader code>","options":{...}}` simulates copying that trader's **real** closed positions from the last 3 months. The positions come from the public OKX endpoint [`public-subpositions-history`](https://www.okx.com/docs-v5/en/#order-book-trading-copy-trading-get-lead-trader-lead-position-history), up to 3 pages of 100, cached for 5 minutes per trader.
+
+Model (`CopyReplay`):
+- Every leader position is copied with a fixed, **unlevered** USDT notional (`trade_notional`).
+- Entry and exit use the leader's real average open and close prices, each moved against the follower by `slippage_bps`. A fee of `fee_bps` is charged on both sides.
+- Opens and closes run in time order. A copy is rejected when free cash or the `max_exposure` share of equity cannot cover it. A copy loses at most its notional.
+- Defaults: `starting_cash` 1000, `trade_notional` 100, `fee_bps` 10, `slippage_bps` 5, `max_exposure` 1.
+
+The result includes:
+- equity, net PnL, return, fees and win rate;
+- maximum drawdown on realized equity;
+- copied and rejected counts;
+- `baseline_pnl`, the same copies without costs, and `cost_drag`;
+- the per-trade list.
+
+The leader's own leverage is not applied, so the leaderboard's levered returns are not comparable one to one. Follower delay is not modelled yet: entries use the leader's fill prices. It is paper only, with no orders.
+
 ## Production release via infra
 
 The canonical repository is [`0xda-market/trading-lab`](https://github.com/0xda-market/trading-lab), with default branch `master`. Production is **manual-only** and takes two separate steps. This repository holds no infra token.

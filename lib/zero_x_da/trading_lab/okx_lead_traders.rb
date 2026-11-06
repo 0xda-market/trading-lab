@@ -20,6 +20,10 @@ module ZeroXDA
 
       ORIGIN = "https://www.okx.com"
       PATH = "/api/v5/copytrading/public-lead-traders"
+      POSITIONS_PATH = "/api/v5/copytrading/public-subpositions-history"
+      MAX_POSITION_PAGES = 3
+      SUB_POSITION_ID = /\A\d{1,24}\z/
+      INSTRUMENT = /\A[A-Z0-9]{1,20}-[A-Z0-9]{2,10}-SWAP\z/
       # Documented limit: 5 requests per 2 seconds per IP.
       MIN_INTERVAL_SECONDS = 0.4
       MAX_BODY_BYTES = 1_048_576
@@ -68,18 +72,80 @@ module ZeroXDA
 
       def ranks(options = {})
         query = query_for(options)
-        uri = URI("#{@origin}#{PATH}?#{URI.encode_www_form(query)}")
+        normalize(get(PATH, query), query)
+      end
+
+      # Closed lead positions of the last 3 months (OKX public-subpositions-history), oldest first.
+      # Reads at most MAX_POSITION_PAGES pages of 100, paging backwards with `after`.
+      def positions(unique_code, max_pages: MAX_POSITION_PAGES)
+        raise ArgumentError, "unique_code is invalid" unless UNIQUE_CODE.match?(unique_code.to_s)
+        raise ArgumentError, "max_pages must be 1..#{MAX_POSITION_PAGES}" unless max_pages.is_a?(Integer) && (1..MAX_POSITION_PAGES).cover?(max_pages)
+        rows = []
+        after = nil
+        max_pages.times do
+          query = { "instType" => "SWAP", "uniqueCode" => unique_code.to_s, "limit" => "100" }
+          query["after"] = after if after
+          data = envelope_data(get(POSITIONS_PATH, query))
+          page = data.map { |row| position(row, unique_code.to_s) }
+          rows.concat(page)
+          break if page.size < 100
+          after = page.map { |row| row["sub_position_id"] }.min_by(&:to_i)
+        end
+        unique = rows.uniq { |row| row["sub_position_id"] }
+        raise Error, "OKX returned duplicate positions" unless unique.size == rows.size
+        rows.sort_by { |row| [row["opened_at_ms"], row["sub_position_id"].to_i] }
+      end
+
+      private
+
+      def get(path, query)
+        uri = URI("#{@origin}#{path}?#{URI.encode_www_form(query)}")
         throttle
         status, body = @transport.call(uri)
         raise RateLimited, "OKX rate limit reached" if status == 429
         raise Error, "OKX responded with HTTP #{status}" unless status == 200
         raise Error, "OKX response is too large" if body.bytesize > MAX_BODY_BYTES # injected transports
-        normalize(JSON.parse(body), query)
+        JSON.parse(body)
       rescue JSON::ParserError
         raise Error, "OKX response is not JSON"
       end
 
-      private
+      def envelope_data(document)
+        raise Error, "OKX response is not an object" unless document.is_a?(Hash)
+        code = document["code"].to_s
+        raise RateLimited, "OKX rate limit reached" if code == "50011"
+        raise Error, "OKX error #{code}: #{document['msg']}" unless code == "0"
+        data = document["data"]
+        raise Error, "OKX response has no data" unless data.is_a?(Array) && data.all?(Hash)
+        data
+      end
+
+      def position(row, unique_code)
+        raise Error, "OKX position belongs to another trader" unless row["uniqueCode"] == unique_code
+        side = row["posSide"]
+        quantity = BigDecimal(decimal(row, "subPos"))
+        side = quantity.negative? ? "short" : "long" if side == "net"
+        raise Error, "OKX posSide is invalid" unless %w[long short].include?(side)
+        opened = Integer(field(row, "openTime", /\A\d{13}\z/), 10)
+        closed = Integer(field(row, "closeTime", /\A\d{13}\z/), 10)
+        raise Error, "OKX position closes before it opens" if closed < opened
+        open_price = decimal(row, "openAvgPx")
+        close_price = decimal(row, "closeAvgPx")
+        raise Error, "OKX position price is not positive" unless BigDecimal(open_price).positive? && BigDecimal(close_price).positive?
+        {
+          "sub_position_id" => field(row, "subPosId", SUB_POSITION_ID),
+          "instrument" => field(row, "instId", INSTRUMENT),
+          "side" => side,
+          "leverage" => decimal(row, "lever"),
+          "open_price" => open_price,
+          "close_price" => close_price,
+          "opened_at_ms" => opened,
+          "closed_at_ms" => closed,
+          "opened_at" => Time.at(Rational(opened, 1000)).utc.iso8601(3),
+          "closed_at" => Time.at(Rational(closed, 1000)).utc.iso8601(3),
+          "leader_pnl_ratio" => decimal(row, "pnlRatio")
+        }
+      end
 
       def query_for(options)
         raise ArgumentError, "options must be an object" unless options.is_a?(Hash)

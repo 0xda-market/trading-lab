@@ -86,3 +86,40 @@ class LeadersHTTPTest < Minitest::Test
     assert_equal 4, calls
   end
 end
+
+class CopyReplayHTTPTest < Minitest::Test
+  POSITION = { "ccy" => "USDT", "closeAvgPx" => "110", "closeTime" => "1697698049031", "instId" => "BTC-USDT-SWAP",
+               "instType" => "SWAP", "lever" => "20", "margin" => "1", "mgnMode" => "isolated", "openAvgPx" => "100",
+               "openTime" => "1697698048031", "pnl" => "1", "pnlRatio" => "0.1", "posSide" => "long", "subPos" => "3",
+               "subPosId" => "635126416883355648", "uniqueCode" => "9A8534AB09862774" }.freeze
+
+  def setup
+    @requests = []
+    transport = ->(uri) { @requests << uri; [200, JSON.generate("code" => "0", "msg" => "", "data" => [POSITION])] }
+    leaders = ZeroXDA::TradingLab::OkxLeadTraders.new(transport: transport, clock: -> { 0.0 }, sleeper: ->(_) {}, throttle: { lock: Mutex.new, last_request_at: nil })
+    @app = ZeroXDA::TradingLab::HTTPApp.new(token: "test-secret", leaders: leaders)
+  end
+
+  def post(body, token: "test-secret")
+    status, _, output = @app.call("REQUEST_METHOD" => "POST", "PATH_INFO" => "/v1/paper/copy-replays",
+                                  "HTTP_AUTHORIZATION" => "Bearer #{token}", "rack.input" => StringIO.new(body))
+    [status, JSON.parse(output.join)]
+  end
+
+  def test_copies_the_real_positions_of_one_lead_trader
+    status, body = post(JSON.generate(unique_code: "9A8534AB09862774", options: { fee_bps: "0", slippage_bps: "0" }))
+    assert_equal 200, status
+    assert_equal ["9A8534AB09862774", 1, "1010.0"], body["data"].values_at("unique_code", "copied", "equity")
+    assert_match %r{public-subpositions-history}, @requests.first.path
+    post(JSON.generate(unique_code: "9A8534AB09862774"))
+    assert_equal 1, @requests.size, "positions are cached per trader"
+  end
+
+  def test_rejects_bad_requests_before_okx
+    assert_equal 401, post("{}", token: "wrong").first
+    assert_equal 422, post(JSON.generate(unique_code: "../x")).first
+    assert_equal 422, post(JSON.generate(unique_code: "9A8534AB09862774", options: { leverage: "50" })).first
+    assert_equal 422, post(JSON.generate(code: "9A8534AB09862774")).first
+    assert_empty @requests
+  end
+end
