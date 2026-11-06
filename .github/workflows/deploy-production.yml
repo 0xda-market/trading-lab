@@ -1,7 +1,10 @@
 # © 2026 aiaiaiai · aiaiaiai.org
 # SPDX-License-Identifier: MIT
 
-name: Deploy Trading Lab via infra
+# Publishes a production release candidate for workload market-trading-lab without any
+# infra credential. Activation stays a separate, manual step: an infra operator runs
+# aiaiaiai-org/infra "Deploy workload" with the image and envelope digests this run prints.
+name: Publish Trading Lab production release
 
 on:
   workflow_dispatch:
@@ -9,25 +12,32 @@ on:
 permissions:
   contents: read
   actions: read
-  packages: write
 
 concurrency:
-  group: trading-lab-production-deploy
+  group: trading-lab-production-publish
   cancel-in-progress: false
 
 jobs:
-  package:
+  publish:
     runs-on: ubuntu-latest
-    timeout-minutes: 40
-    outputs:
-      image: ${{ steps.immutable.outputs.image }}
+    timeout-minutes: 30
+    environment:
+      name: production
+    permissions:
+      contents: read
+      actions: read
+      packages: write
+      id-token: write
+      attestations: write
+    env:
+      IMAGE: ghcr.io/0xda-market/trading-lab
     steps:
-      - name: Gate manual deployment on exact master Full CI
+      - name: Gate on exact master Full CI
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -Eeuo pipefail
-          test "$GITHUB_REF" = refs/heads/master || { echo "::error::Only master can be deployed." >&2; exit 1; }
+          test "$GITHUB_REF" = refs/heads/master || { echo "::error::Only master can be released." >&2; exit 1; }
           runs="$(gh api --method GET "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?event=push&head_sha=$GITHUB_SHA&per_page=100")"
           jq -e --arg sha "$GITHUB_SHA" '
             [.workflow_runs[] | select(.head_sha == $sha and .head_branch == "master"
@@ -38,151 +48,86 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Login to producer GHCR
+      - name: Authenticate to GHCR
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ github.token }}
 
-      - name: Build and publish immutable image
-        id: build
+      - name: Build and publish the release image
+        id: image
         uses: docker/build-push-action@v6
         with:
           context: .
-          push: true
           platforms: linux/amd64
-          tags: ghcr.io/0xda-market/trading-lab:production-${{ github.sha }}
+          push: true
+          tags: ${{ env.IMAGE }}:production-${{ github.sha }}
 
-      - name: Extract immutable image digest
-        id: immutable
+      - name: Attest the release image
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.image.outputs.digest }}
+          push-to-registry: true
+
+      - name: Encrypt the production service token to the edge-prod-1 recipient
         env:
-          DIGEST: ${{ steps.build.outputs.digest }}
-        run: |
-          set -Eeuo pipefail
-          [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || exit 1
-          echo "image=ghcr.io/0xda-market/trading-lab@$DIGEST" >> "$GITHUB_OUTPUT"
-
-  request:
-    needs: package
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-    environment:
-      name: production
-    env:
-      INFRA_REPOSITORY: aiaiaiai-org/infra
-      WORKLOAD: market-trading-lab
-      IMAGE_REF: ${{ needs.package.outputs.image }}
-    steps:
-      - name: Validate producer credentials
-        env:
-          GH_TOKEN: ${{ secrets.INFRA_DEPLOY_TOKEN }}
-          SERVICE_TOKEN: ${{ secrets.TRADING_LAB_SERVICE_TOKEN }}
-        run: |
-          set -Eeuo pipefail
-          test "$GITHUB_REF" = refs/heads/master
-          [[ "$IMAGE_REF" =~ ^ghcr[.]io/0xda-market/trading-lab@sha256:[0-9a-f]{64}$ ]]
-          test -n "$GH_TOKEN" || { echo "::error::Missing INFRA_DEPLOY_TOKEN." >&2; exit 1; }
-          test -n "$SERVICE_TOKEN" || { echo "::error::Missing TRADING_LAB_SERVICE_TOKEN." >&2; exit 1; }
-          [[ "$SERVICE_TOKEN" != *$'\n'* && "$SERVICE_TOKEN" != *$'\r'* ]] || exit 1
-
-      - name: Fetch the public recipient for the target Environment
-        env:
-          GH_TOKEN: ${{ secrets.INFRA_DEPLOY_TOKEN }}
-        run: |
-          set -Eeuo pipefail
-          workflow=issue-workload-recipient.yml
-          endpoint="repos/$INFRA_REPOSITORY/actions/workflows/$workflow/runs"
-          baseline="$(gh api "$endpoint?event=repository_dispatch&per_page=1" --jq '.workflow_runs[0].id // 0')"
-          [[ "$baseline" =~ ^[0-9]+$ ]]
-          jq -nc --arg workload "$WORKLOAD" --arg request_id "$GITHUB_RUN_ID" \
-            '{event_type:"issue-workload-recipient", client_payload:{workload:$workload, request_id:$request_id}}' |
-            gh api --method POST "repos/$INFRA_REPOSITORY/dispatches" --input -
-
-          title="Recipient $WORKLOAD / $GITHUB_RUN_ID"
-          recipient_run=""
-          for attempt in $(seq 1 60); do
-            run="$(gh api "$endpoint?event=repository_dispatch&per_page=100" |
-              jq -c --arg title "$title" --argjson baseline "$baseline" '
-                [.workflow_runs[] | select(.id > $baseline and .display_title == $title
-                  and .head_branch == "master")] | sort_by(.id) | last // empty')"
-            if [[ -n "$run" && "$(jq -r .status <<< "$run")" == completed ]]; then
-              test "$(jq -r .conclusion <<< "$run")" = success || { echo "::error::Recipient issuance failed." >&2; exit 1; }
-              recipient_run="$(jq -r .id <<< "$run")"
-              break
-            fi
-            sleep 10
-          done
-          test -n "$recipient_run" || { echo "::error::No recipient workflow result." >&2; exit 1; }
-          install -d -m 0700 "$RUNNER_TEMP/recipient"
-          gh run download "$recipient_run" --repo "$INFRA_REPOSITORY" \
-            --name "recipient-$WORKLOAD-$GITHUB_RUN_ID" --dir "$RUNNER_TEMP/recipient"
-          recipient_path="$RUNNER_TEMP/recipient/recipient.pub"
-          test -s "$recipient_path"
-          test "$(wc -l < "$recipient_path")" -eq 1
-          grep -Eq '^ssh-(ed25519|rsa) [A-Za-z0-9+/=]+( .*)?$' "$recipient_path"
-          ssh-keygen -lf "$recipient_path" >/dev/null
-          echo "TRADING_LAB_RECIPIENT_PATH=$recipient_path" >> "$GITHUB_ENV"
-
-      - name: Encrypt allowlisted producer secret and dispatch immutable image
-        env:
-          GH_TOKEN: ${{ secrets.INFRA_DEPLOY_TOKEN }}
-          SERVICE_TOKEN: ${{ secrets.TRADING_LAB_SERVICE_TOKEN }}
-          GHCR_PULL_USER: ${{ github.actor }}
-          GHCR_PULL_TOKEN: ${{ github.token }}
+          TRADING_LAB_SERVICE_TOKEN: ${{ secrets.TRADING_LAB_SERVICE_TOKEN }}
         run: |
           set -Eeuo pipefail
           umask 077
-          for name in SERVICE_TOKEN GHCR_PULL_USER GHCR_PULL_TOKEN; do
-            value="$(printenv "$name")"
-            test -n "$value" || { echo "::error::Missing producer credential $name." >&2; exit 1; }
-            [[ "$value" != *$'\n'* && "$value" != *$'\r'* ]] || exit 1
-          done
-          sudo apt-get update -qq && sudo apt-get install -y -qq age
-          secret_file="$RUNNER_TEMP/trading-lab.env"
-          encrypted_file="$RUNNER_TEMP/trading-lab.age"
-          trap 'rm -f "$secret_file" "$encrypted_file"; rm -rf "$RUNNER_TEMP/recipient"' EXIT
-          {
-            printf 'TRADING_LAB_SERVICE_TOKEN=%s\n' "$SERVICE_TOKEN"
-            printf 'GHCR_PULL_USER=%s\n' "$GHCR_PULL_USER"
-            printf 'GHCR_PULL_TOKEN=%s\n' "$GHCR_PULL_TOKEN"
-          } > "$secret_file"
-          age --armor --recipient "$(cat "$TRADING_LAB_RECIPIENT_PATH")" \
-            --output "$encrypted_file" "$secret_file"
-          rm -f "$secret_file"
-          baseline="$(gh api "repos/$INFRA_REPOSITORY/actions/workflows/deploy-workload.yml/runs?event=repository_dispatch&per_page=1" --jq '.workflow_runs[0].id // 0')"
-          jq -nc --arg workload "$WORKLOAD" --arg image "$IMAGE_REF" --rawfile secrets_age "$encrypted_file" \
-            '{event_type:"deploy-workload", client_payload:{workload:$workload, image:$image, secrets_age:$secrets_age}}' |
-            gh api --method POST "repos/$INFRA_REPOSITORY/dispatches" --input -
-          # Remain alive until infra activates, so the ephemeral package token is valid.
-          echo "DEPLOY_BASELINE=$baseline" >> "$GITHUB_ENV"
+          [[ -n "$TRADING_LAB_SERVICE_TOKEN" && "$TRADING_LAB_SERVICE_TOKEN" != *$'\n'* && "$TRADING_LAB_SERVICE_TOKEN" != *$'\r'* ]] || {
+            echo "::error::TRADING_LAB_SERVICE_TOKEN is missing or multiline in the production Environment." >&2
+            exit 1
+          }
+          contract="$(curl -fsSL https://raw.githubusercontent.com/aiaiaiai-org/infra/master/contracts/servers/edge-prod-1.yaml)"
+          recipient="$(sed -n 's/^  encryptionRecipient: //p' <<<"$contract")"
+          [[ "$recipient" =~ ^ssh-ed25519\ [A-Za-z0-9+/]{68}$ ]] || {
+            echo "::error::edge-prod-1 publishes no valid encryptionRecipient." >&2
+            exit 1
+          }
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq age
+          mkdir -p "$RUNNER_TEMP/envelope"
+          printf 'TRADING_LAB_SERVICE_TOKEN=%s\n' "$TRADING_LAB_SERVICE_TOKEN" |
+            age --recipient "$recipient" --output "$RUNNER_TEMP/envelope/secrets.age"
+          test -s "$RUNNER_TEMP/envelope/secrets.age"
+          printf 'FROM scratch\nCOPY secrets.age /secrets.age\n' > "$RUNNER_TEMP/envelope/Dockerfile"
+          echo "ENVELOPE_CONTEXT=$RUNNER_TEMP/envelope" >> "$GITHUB_ENV"
 
-      - name: Wait for the infra deployment health result
+      - name: Publish the secret envelope
+        id: envelope
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ env.ENVELOPE_CONTEXT }}
+          platforms: linux/amd64
+          push: true
+          provenance: false
+          tags: ${{ env.IMAGE }}:production-${{ github.sha }}.secrets
+
+      - name: Attest the secret envelope
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.envelope.outputs.digest }}
+          push-to-registry: true
+
+      - name: Print the manual activation inputs
         env:
-          GH_TOKEN: ${{ secrets.INFRA_DEPLOY_TOKEN }}
+          IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
+          ENVELOPE_DIGEST: ${{ steps.envelope.outputs.digest }}
         run: |
           set -Eeuo pipefail
-          endpoint="repos/$INFRA_REPOSITORY/actions/workflows/deploy-workload.yml/runs"
-          title="Deploy $WORKLOAD"
-          status=""
-          conclusion=""
-          found=""
-          for attempt in $(seq 1 150); do
-            response="$(gh api "$endpoint?event=repository_dispatch&per_page=100")"
-            run="$(jq -c --arg title "$title" --argjson baseline "$DEPLOY_BASELINE" '
-              [.workflow_runs[] | select(.id > $baseline and .display_title == $title
-                and .head_branch == "master")] | sort_by(.id) | first // empty' <<< "$response")"
-            if [[ -n "$run" ]]; then
-              found="$(jq -r .id <<< "$run")"
-              status="$(jq -r .status <<< "$run")"
-              conclusion="$(jq -r '.conclusion // ""' <<< "$run")"
-              if [[ "$status" == completed ]]; then
-                echo "Infra workflow: https://github.com/$INFRA_REPOSITORY/actions/runs/$found"
-                test "$conclusion" = success || { echo "::error::Infra activation or health failed." >&2; exit 1; }
-                exit 0
-              fi
-            fi
-            sleep 10
-          done
-          echo "::error::Infra deployment result not verified; inspect the infra workflow before claiming success." >&2
-          exit 1
+          [[ "$IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ && "$ENVELOPE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          {
+            echo "### Trading Lab production release candidate"
+            echo
+            echo "Activate by hand in aiaiaiai-org/infra → Actions → **Deploy workload** (branch master):"
+            echo
+            echo "| input | value |"
+            echo "| --- | --- |"
+            echo "| workload | \`market-trading-lab\` |"
+            echo "| image | \`$IMAGE@$IMAGE_DIGEST\` |"
+            echo "| secrets_image | \`$IMAGE@$ENVELOPE_DIGEST\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
