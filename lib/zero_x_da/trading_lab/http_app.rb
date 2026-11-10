@@ -9,6 +9,7 @@ require_relative "okx_lead_traders"
 require_relative "leaderboard_cache"
 require_relative "copy_replay"
 require_relative "copy_quotes"
+require_relative "research_store"
 
 module ZeroXDA
   module TradingLab
@@ -18,11 +19,14 @@ module ZeroXDA
 
       LEADERS_PATH = "/v1/leaders/okx"
       COPY_PATH = "/v1/paper/copy-replays"
+      REPLAY_PATH = "/v1/paper/replays"
+      RUNS_PATH = "/v1/research/runs"
+      RUN_PATH = %r{\A/v1/research/runs/([1-9]\d{0,17})\z}
       MAX_QUERY_BYTES = 512
 
       def initialize(token: ENV.fetch("TRADING_LAB_SERVICE_TOKEN"), leaders: OkxLeadTraders.new, leaders_cache: LeaderboardCache.new,
                      positions_cache: LeaderboardCache.new(ttl_seconds: 300, max_entries: 32), quotes: CopyQuotes.new,
-                     copies_cache: LeaderboardCache.new(ttl_seconds: 300, max_entries: 32))
+                     copies_cache: LeaderboardCache.new(ttl_seconds: 300, max_entries: 32), store: ResearchStore.from_env)
         raise ArgumentError, "TRADING_LAB_SERVICE_TOKEN is required" if token.to_s.empty?
         @token = token.to_s
         @leaders = leaders
@@ -30,22 +34,34 @@ module ZeroXDA
         @positions_cache = positions_cache
         @quotes = quotes
         @copies_cache = copies_cache
+        @store = store
       end
 
       def call(env)
         return reply(200, status: "ok") if env["REQUEST_METHOD"] == "GET" && env["PATH_INFO"] == "/health"
         route = [env["REQUEST_METHOD"], env["PATH_INFO"]]
-        return reply(404, error: "not_found") unless [["POST", "/v1/paper/replays"], ["GET", LEADERS_PATH], ["POST", COPY_PATH]].include?(route)
+        run_id = route.first == "GET" && RUN_PATH.match(route.last)&.captures&.first
+        known = [["POST", REPLAY_PATH], ["GET", LEADERS_PATH], ["POST", COPY_PATH], ["GET", RUNS_PATH]].include?(route)
+        return reply(404, error: "not_found") unless known || run_id
         authorization = env["HTTP_AUTHORIZATION"].to_s
         provided = authorization.delete_prefix("Bearer ")
         return reply(401, error: "unauthorized") unless authorization.start_with?("Bearer ") && secure_equal?(provided, @token)
+        return stored_run(Integer(run_id, 10)) if run_id
+        return stored_runs(env["QUERY_STRING"].to_s) if route.last == RUNS_PATH
         return leaders(env["QUERY_STRING"].to_s) if route.first == "GET"
         raw = env.fetch("rack.input").read(MAX_BYTES + 1)
         return reply(413, error: "payload_too_large") if raw.bytesize > MAX_BYTES
         document = JSON.parse(raw)
         return copy_replay(document) if route.last == COPY_PATH
-        return reply(422, error: "invalid_request") unless document.is_a?(Hash) && document.key?("events") && (document.keys - %w[events options]).empty?
-        reply(200, status: "ok", data: Replay.call(document["events"], document.fetch("options", {})))
+        return reply(422, error: "invalid_request") unless document.is_a?(Hash) && document.key?("events") && (document.keys - %w[events options experiment]).empty?
+        experiment = experiment(document)
+        options = document.fetch("options", {})
+        result = Replay.call(document["events"], options)
+        portfolio = result.slice("ending_cash", "equity", "open_positions")
+        run = record(kind: "paper_replay", options: options, input: document["events"], result: result, portfolio: portfolio, experiment: experiment)
+        reply(200, { status: "ok", data: result }.merge(run))
+      rescue ResearchStore::Unavailable
+        reply(503, error: "store_unavailable")
       rescue JSON::ParserError
         reply(400, error: "invalid_json")
       rescue OkxLeadTraders::RateLimited
@@ -59,22 +75,68 @@ module ZeroXDA
       private
 
       # Paper copy of a lead trader's real closed OKX positions; nothing is ordered. Quoting a
-      # copy reads many candle pages, so a finished result is kept for the positions' lifetime.
+      # copy reads many candle pages, so a finished result is kept for the positions' lifetime
+      # and recorded once, when it is computed.
       def copy_replay(document)
-        valid = document.is_a?(Hash) && document["unique_code"].is_a?(String) && (document.keys - %w[unique_code options]).empty?
+        valid = document.is_a?(Hash) && document["unique_code"].is_a?(String) && (document.keys - %w[unique_code options experiment]).empty?
         return reply(422, error: "invalid_request") unless valid
         code = document["unique_code"]
         raise ArgumentError, "unique_code is invalid" unless OkxLeadTraders::UNIQUE_CODE.match?(code)
+        experiment = experiment(document)
         options = document.fetch("options", {})
         replay = CopyReplay.new(options)
-        key = JSON.generate([code, options.transform_keys(&:to_s).sort])
-        data = @copies_cache.fetch(key) do
+        key = JSON.generate([code, options.transform_keys(&:to_s).sort, experiment])
+        body = @copies_cache.fetch(key) do
           available = @positions_cache.fetch(code) { @leaders.positions(code) }
           positions = replay.select(available)
           quotes = replay.quoted? ? @quotes.call(positions, replay.delay_ms) : nil
-          { "unique_code" => code, "positions_available" => available.size }.merge(replay.call(positions, quotes))
+          result = replay.call(positions, quotes)
+          portfolio = { "ending_cash" => result["equity"], "equity" => result["equity"], "open_positions" => {} }
+          run = record(kind: "copy_replay", subject: code, options: options, input: positions, result: result,
+                       portfolio: portfolio, experiment: experiment)
+          { status: "ok", data: { "unique_code" => code, "positions_available" => available.size }.merge(result) }.merge(run)
         end
-        reply(200, status: "ok", data: data)
+        reply(200, body)
+      end
+
+      def experiment(document)
+        name = document["experiment"]
+        ResearchStore.validate_experiment(name)
+        raise ResearchStore::Unavailable, "no store" if name && !@store
+        name
+      end
+
+      # A simulation that cannot be stored is still a valid answer: it is returned with a null
+      # run_id instead of being thrown away. Without a configured store nothing is added.
+      def record(**run)
+        return {} unless @store
+        { run_id: @store.record_run(**run) }
+      rescue ResearchStore::Unavailable
+        raise if run[:experiment]
+        { run_id: nil }
+      end
+
+      def stored_runs(raw_query)
+        raise ResearchStore::Unavailable, "no store" unless @store
+        return reply(414, error: "query_too_long") if raw_query.bytesize > MAX_QUERY_BYTES
+        pairs = URI.decode_www_form(raw_query)
+        query = pairs.to_h
+        raise ArgumentError, "unknown or duplicate query parameter" unless pairs.size == query.size && (query.keys - %w[kind subject experiment limit before]).empty?
+        filters = { kind: query["kind"], subject: query["subject"], experiment: query["experiment"] }
+        filters[:limit] = whole(query["limit"], "limit") if query.key?("limit")
+        filters[:before] = whole(query["before"], "before") if query.key?("before")
+        reply(200, status: "ok", data: { "runs" => @store.runs(**filters) })
+      end
+
+      def stored_run(id)
+        raise ResearchStore::Unavailable, "no store" unless @store
+        run = @store.run(id)
+        run ? reply(200, status: "ok", data: run) : reply(404, error: "not_found")
+      end
+
+      def whole(value, name)
+        raise ArgumentError, "#{name} must be a whole number" unless /\A\d{1,18}\z/.match?(value.to_s)
+        Integer(value, 10)
       end
 
       # Read-only public leaderboard. Options are validated by OkxLeadTraders before any upstream call.

@@ -9,6 +9,7 @@ RUN bundle config set --local without test && bundle install
 COPY config.ru ./
 COPY config/puma.rb config/puma.rb
 COPY lib/ lib/
+COPY db/ db/
 
 FROM ruby:3.3.11-slim
 WORKDIR /app

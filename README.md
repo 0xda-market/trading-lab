@@ -98,6 +98,20 @@ Limits of the model:
 - A quoted replay reads up to 120 candle pages from OKX (20 requests per 2 s per IP), so the first call for a trader can take tens of seconds; the result is cached for 5 minutes. When the positions need more pages than that, the call returns 422 and asks for a lower `max_positions`.
 - It is paper only, with no orders.
 
+## Research store (PostgreSQL, optional)
+
+Set `TRADING_LAB_DATABASE_URL` to a `postgres://` URL and the service keeps a history of its research in schema `trading_lab`. Without the variable it computes exactly as before and keeps nothing.
+
+- **What is stored.** Every paper replay and every computed copy replay becomes one row in `simulation_runs`: kind, options, the SHA-256 of the exact input, equity, net PnL, drawdown, the paper portfolio it ended with (cash, equity, open positions) and the full result. A request may name an `"experiment"` (`^[a-z0-9][a-z0-9._-]{0,62}$`) to group runs.
+- **Append-only.** A trigger rejects `UPDATE` and `DELETE` on runs, so a recorded result cannot be edited afterwards.
+- **Migrations.** `db/migrate/*.sql` are applied in name order at boot (`config.ru`) and by `bundle exec ruby bin/trading-lab migrate`. They are serialized by an advisory lock, and a file changed after it was applied stops the migration. A configured database that cannot be reached stops the boot.
+- **Responses.** With a store, both replay endpoints add a top-level `run_id`. If the write fails the simulation is still returned, with `"run_id": null`; a request that names an experiment fails with 503 `store_unavailable` instead, because it asked to be recorded.
+- **Reading back.** `GET /v1/research/runs?kind=&subject=&experiment=&limit=&before=` lists runs newest first without their full result (`limit` 1–100, `before` pages back by id). `GET /v1/research/runs/<id>` returns one run with its portfolio and result. Both need the service token and return 503 `store_unavailable` without a store.
+
+The store holds paper results only: no balance, order or credential. It uses the `pg` gem, whose platform gem ships its own `libpq`, so the image needs no extra package.
+
+**Not deployed yet.** Neither infra workload sets `TRADING_LAB_DATABASE_URL`, so development and production keep running without persistence until a database is allocated in `aiaiaiai-org/infra` and the variable is added to the secret envelope. That is a separate, reviewed change.
+
 ## Production release via infra
 
 The canonical repository is [`0xda-market/trading-lab`](https://github.com/0xda-market/trading-lab), with default branch `master`. Production is **manual-only** and takes two separate steps. This repository holds no infra token.
@@ -113,7 +127,7 @@ The canonical repository is [`0xda-market/trading-lab`](https://github.com/0xda-
 - Workload: `market-trading-lab`, private Docker alias `market-trading-lab` on `nilx-edge`, port `1927`, no public route. Health check: `GET /health`. Replay and leaderboard require the bearer token.
 - A production Telegram bot would hold `TRADING_LAB_TOKEN` (equal to the service token) and `TRADING_LAB_ORIGIN=http://market-trading-lab:1927`. That bot wiring is a separate, reviewed change.
 
-No public DNS, new Telegram credentials, trading API keys, database or live trading are required.
+No public DNS, new Telegram credentials, trading API keys or live trading are required. A database is optional (see *Research store*).
 
 ## Development delivery (automatic)
 
