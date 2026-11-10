@@ -10,6 +10,7 @@ require_relative "leaderboard_cache"
 require_relative "copy_replay"
 require_relative "copy_quotes"
 require_relative "research_store"
+require_relative "market_tick_store"
 
 module ZeroXDA
   module TradingLab
@@ -21,6 +22,7 @@ module ZeroXDA
       COPY_PATH = "/v1/paper/copy-replays"
       REPLAY_PATH = "/v1/paper/replays"
       RUNS_PATH = "/v1/research/runs"
+      MARKET_SESSIONS_PATH = "/v1/market/sessions"
       RUN_PATH = %r{\A/v1/research/runs/([1-9]\d{0,17})\z}
       MAX_QUERY_BYTES = 512
 
@@ -41,13 +43,15 @@ module ZeroXDA
         return reply(200, status: "ok") if env["REQUEST_METHOD"] == "GET" && env["PATH_INFO"] == "/health"
         route = [env["REQUEST_METHOD"], env["PATH_INFO"]]
         run_id = route.first == "GET" && RUN_PATH.match(route.last)&.captures&.first
-        known = [["POST", REPLAY_PATH], ["GET", LEADERS_PATH], ["POST", COPY_PATH], ["GET", RUNS_PATH]].include?(route)
+        known = [["POST", REPLAY_PATH], ["GET", LEADERS_PATH], ["POST", COPY_PATH], ["GET", RUNS_PATH],
+                 ["GET", MARKET_SESSIONS_PATH]].include?(route)
         return reply(404, error: "not_found") unless known || run_id
         authorization = env["HTTP_AUTHORIZATION"].to_s
         provided = authorization.delete_prefix("Bearer ")
         return reply(401, error: "unauthorized") unless authorization.start_with?("Bearer ") && secure_equal?(provided, @token)
         return stored_run(Integer(run_id, 10)) if run_id
         return stored_runs(env["QUERY_STRING"].to_s) if route.last == RUNS_PATH
+        return market_sessions(env["QUERY_STRING"].to_s) if route.last == MARKET_SESSIONS_PATH
         return leaders(env["QUERY_STRING"].to_s) if route.first == "GET"
         raw = env.fetch("rack.input").read(MAX_BYTES + 1)
         return reply(413, error: "payload_too_large") if raw.bytesize > MAX_BYTES
@@ -138,6 +142,16 @@ module ZeroXDA
         raise ResearchStore::Unavailable, "no store" unless @store
         run = @store.run(id)
         run ? reply(200, status: "ok", data: run) : reply(404, error: "not_found")
+      end
+
+      # Coverage of the collected quotes: each session is one live connection, newest first.
+      def market_sessions(raw_query)
+        raise ResearchStore::Unavailable, "no store" unless @store
+        return reply(414, error: "query_too_long") if raw_query.bytesize > MAX_QUERY_BYTES
+        pairs = URI.decode_www_form(raw_query)
+        raise ArgumentError, "unknown or duplicate query parameter" unless pairs.map(&:first).then { |keys| keys.uniq == keys && (keys - %w[limit]).empty? }
+        limit = pairs.empty? ? 20 : whole(pairs.first.last, "limit")
+        reply(200, status: "ok", data: { "sessions" => MarketTickStore.new(@store).sessions(limit: limit) })
       end
 
       def whole(value, name)
