@@ -15,7 +15,7 @@ class CopyReplayTest < Minitest::Test
   end
 
   def replay(positions, options = {})
-    ZeroXDA::TradingLab::CopyReplay.call(positions, options)
+    ZeroXDA::TradingLab::CopyReplay.call(positions, { "pricing" => "leader" }.merge(options))
   end
 
   def test_frictionless_long_and_short_match_the_leader_prices

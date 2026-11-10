@@ -3,11 +3,8 @@
 # frozen_string_literal: true
 
 require "bigdecimal"
-require "json"
-require "net/http"
-require "openssl"
 require "time"
-require "uri"
+require_relative "okx_public"
 
 module ZeroXDA
   module TradingLab
@@ -15,10 +12,10 @@ module ZeroXDA
     # (GET /api/v5/copytrading/public-lead-traders). It sends no credentials,
     # signs nothing and cannot place, copy or cancel orders.
     class OkxLeadTraders
-      class Error < StandardError; end
-      class RateLimited < Error; end
+      Error = OkxPublic::Error
+      RateLimited = OkxPublic::RateLimited
 
-      ORIGIN = "https://www.okx.com"
+      ORIGIN = OkxPublic::ORIGIN
       PATH = "/api/v5/copytrading/public-lead-traders"
       POSITIONS_PATH = "/api/v5/copytrading/public-subpositions-history"
       MAX_POSITION_PAGES = 3
@@ -26,7 +23,7 @@ module ZeroXDA
       INSTRUMENT = /\A[A-Z0-9]{1,20}-[A-Z0-9]{2,10}-SWAP\z/
       # Documented limit: 5 requests per 2 seconds per IP.
       MIN_INTERVAL_SECONDS = 0.4
-      MAX_BODY_BYTES = 1_048_576
+      MAX_BODY_BYTES = OkxPublic::MAX_BODY_BYTES
       SORT_TYPES = %w[overview pnl aum win_ratio pnl_ratio current_copy_trader_pnl].freeze
       MIN_LEAD_DAYS = { 7 => "1", 30 => "2", 90 => "3", 180 => "4" }.freeze
       OPTIONS = %w[sort state min_lead_days min_assets max_assets min_aum max_aum data_version page limit].freeze
@@ -34,40 +31,13 @@ module ZeroXDA
       # The documented limit is per IP, so instances share one throttle by default.
       SHARED_THROTTLE = { lock: Mutex.new, last_request_at: nil }
 
-      NETWORK_ERRORS = [SocketError, SystemCallError, Timeout::Error, OpenSSL::SSL::SSLError, Net::HTTPBadResponse, EOFError].freeze
-
-      # Honors https_proxy/no_proxy (Net::HTTP's own :ENV lookup reads only http_proxy).
       def self.default_transport
-        lambda do |uri|
-          proxy = uri.find_proxy
-          http = Net::HTTP.new(uri.host, uri.port, proxy&.host, proxy&.port, proxy&.user, proxy&.password)
-          http.use_ssl = uri.scheme == "https"
-          http.open_timeout = 5
-          http.read_timeout = 10
-          http.start do
-            request = Net::HTTP::Get.new(uri)
-            request["accept"] = "application/json"
-            request["user-agent"] = "0xda-trading-lab"
-            http.request(request) do |response|
-              body = +""
-              response.read_body do |chunk|
-                body << chunk
-                raise Error, "OKX response is too large" if body.bytesize > MAX_BODY_BYTES
-              end
-              return [response.code.to_i, body]
-            end
-          end
-        rescue *NETWORK_ERRORS => error
-          raise Error, "OKX request failed: #{error.class}"
-        end
+        OkxPublic.default_transport
       end
 
-      def initialize(transport: self.class.default_transport, clock: -> { Process.clock_gettime(Process::CLOCK_MONOTONIC) }, sleeper: ->(seconds) { sleep(seconds) }, throttle: SHARED_THROTTLE, origin: ORIGIN)
-        @origin = origin
-        @transport = transport
-        @clock = clock
-        @sleeper = sleeper
-        @throttle = throttle
+      def initialize(transport: self.class.default_transport, clock: OkxPublic.monotonic, sleeper: ->(seconds) { sleep(seconds) }, throttle: SHARED_THROTTLE, origin: ORIGIN)
+        @okx = OkxPublic.new(transport: transport, clock: clock, sleeper: sleeper, throttle: throttle, origin: origin,
+                             min_interval: MIN_INTERVAL_SECONDS)
       end
 
       def ranks(options = {})
@@ -85,7 +55,7 @@ module ZeroXDA
         max_pages.times do
           query = { "instType" => "SWAP", "uniqueCode" => unique_code.to_s, "limit" => "100" }
           query["after"] = after if after
-          data = envelope_data(get(POSITIONS_PATH, query))
+          data = @okx.data(POSITIONS_PATH, query)
           page = data.map { |row| position(row, unique_code.to_s) }
           rows.concat(page)
           break if page.size < 100
@@ -99,25 +69,7 @@ module ZeroXDA
       private
 
       def get(path, query)
-        uri = URI("#{@origin}#{path}?#{URI.encode_www_form(query)}")
-        throttle
-        status, body = @transport.call(uri)
-        raise RateLimited, "OKX rate limit reached" if status == 429
-        raise Error, "OKX responded with HTTP #{status}" unless status == 200
-        raise Error, "OKX response is too large" if body.bytesize > MAX_BODY_BYTES # injected transports
-        JSON.parse(body)
-      rescue JSON::ParserError
-        raise Error, "OKX response is not JSON"
-      end
-
-      def envelope_data(document)
-        raise Error, "OKX response is not an object" unless document.is_a?(Hash)
-        code = document["code"].to_s
-        raise RateLimited, "OKX rate limit reached" if code == "50011"
-        raise Error, "OKX error #{code}: #{document['msg']}" unless code == "0"
-        data = document["data"]
-        raise Error, "OKX response has no data" unless data.is_a?(Array) && data.all?(Hash)
-        data
+        @okx.get(path, query)
       end
 
       def position(row, unique_code)
@@ -187,21 +139,6 @@ module ZeroXDA
           query["limit"] = limit.to_s
         end
         query
-      end
-
-      def throttle
-        @throttle[:lock].synchronize do
-          now = @clock.call
-          last = @throttle[:last_request_at]
-          if last
-            wait = MIN_INTERVAL_SECONDS - (now - last)
-            if wait.positive?
-              @sleeper.call(wait)
-              now += wait
-            end
-          end
-          @throttle[:last_request_at] = now
-        end
       end
 
       def normalize(document, query)

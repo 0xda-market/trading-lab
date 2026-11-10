@@ -6,6 +6,7 @@ require "minitest/autorun"
 require "json"
 require "stringio"
 require_relative "../lib/zero_x_da/trading_lab/http_app"
+require_relative "support/fake_candles"
 
 class LeadersHTTPTest < Minitest::Test
   Lead = ZeroXDA::TradingLab::OkxLeadTraders
@@ -97,7 +98,10 @@ class CopyReplayHTTPTest < Minitest::Test
     @requests = []
     transport = ->(uri) { @requests << uri; [200, JSON.generate("code" => "0", "msg" => "", "data" => [POSITION])] }
     leaders = ZeroXDA::TradingLab::OkxLeadTraders.new(transport: transport, clock: -> { 0.0 }, sleeper: ->(_) {}, throttle: { lock: Mutex.new, last_request_at: nil })
-    @app = ZeroXDA::TradingLab::HTTPApp.new(token: "test-secret", leaders: leaders)
+    # The leader opens at 100 inside minute :47; the follower's first quote is the :48 open.
+    @candles = FakeCandles.new(1_697_698_020_000 => "100", 1_697_698_080_000 => "105", 1_697_698_140_000 => "110")
+    @app = ZeroXDA::TradingLab::HTTPApp.new(token: "test-secret", leaders: leaders,
+                                            quotes: ZeroXDA::TradingLab::CopyQuotes.new(candles: @candles))
   end
 
   def post(body, token: "test-secret")
@@ -107,12 +111,26 @@ class CopyReplayHTTPTest < Minitest::Test
   end
 
   def test_copies_the_real_positions_of_one_lead_trader
-    status, body = post(JSON.generate(unique_code: "9A8534AB09862774", options: { fee_bps: "0", slippage_bps: "0" }))
+    status, body = post(JSON.generate(unique_code: "9A8534AB09862774", options: { fee_bps: "0", slippage_bps: "0", pricing: "leader" }))
     assert_equal 200, status
     assert_equal ["9A8534AB09862774", 1, "1010.0"], body["data"].values_at("unique_code", "copied", "equity")
     assert_match %r{public-subpositions-history}, @requests.first.path
-    post(JSON.generate(unique_code: "9A8534AB09862774"))
+    post(JSON.generate(unique_code: "9A8534AB09862774", options: { pricing: "leader" }))
     assert_equal 1, @requests.size, "positions are cached per trader"
+  end
+
+  def test_default_pricing_fills_at_quotes_after_the_follower_delay
+    body = JSON.generate(unique_code: "9A8534AB09862774", options: { fee_bps: "0", slippage_bps: "0" })
+    status, reply = post(body)
+    assert_equal 200, status
+    data = reply["data"]
+    # The leader's 1 s trade (+10 %) is over before the follower's first quote: in and out at 105.
+    assert_equal ["quotes", 5, 1, 1], data.values_at("pricing", "follower_delay_seconds", "copied", "positions_available")
+    assert_equal %w[105.0 105.0 100.0 110.0], data["trades"].first.values_at("entry", "exit", "leader_entry", "leader_exit")
+    assert_equal %w[1000.0 10.0 10.0], data.values_at("equity", "baseline_pnl", "delay_drag")
+    calls = @candles.calls.size
+    post(body)
+    assert_equal calls, @candles.calls.size, "a finished copy replay is cached"
   end
 
   def test_rejects_bad_requests_before_okx
@@ -120,6 +138,7 @@ class CopyReplayHTTPTest < Minitest::Test
     assert_equal 422, post(JSON.generate(unique_code: "../x")).first
     assert_equal 422, post(JSON.generate(unique_code: "9A8534AB09862774", options: { leverage: "50" })).first
     assert_equal 422, post(JSON.generate(code: "9A8534AB09862774")).first
+    assert_equal 422, post(JSON.generate(unique_code: "9A8534AB09862774", options: { follower_delay_seconds: -1 })).first
     assert_empty @requests
   end
 end

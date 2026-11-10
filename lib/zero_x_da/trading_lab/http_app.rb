@@ -8,6 +8,7 @@ require_relative "replay"
 require_relative "okx_lead_traders"
 require_relative "leaderboard_cache"
 require_relative "copy_replay"
+require_relative "copy_quotes"
 
 module ZeroXDA
   module TradingLab
@@ -20,12 +21,15 @@ module ZeroXDA
       MAX_QUERY_BYTES = 512
 
       def initialize(token: ENV.fetch("TRADING_LAB_SERVICE_TOKEN"), leaders: OkxLeadTraders.new, leaders_cache: LeaderboardCache.new,
-                     positions_cache: LeaderboardCache.new(ttl_seconds: 300, max_entries: 32))
+                     positions_cache: LeaderboardCache.new(ttl_seconds: 300, max_entries: 32), quotes: CopyQuotes.new,
+                     copies_cache: LeaderboardCache.new(ttl_seconds: 300, max_entries: 32))
         raise ArgumentError, "TRADING_LAB_SERVICE_TOKEN is required" if token.to_s.empty?
         @token = token.to_s
         @leaders = leaders
         @leaders_cache = leaders_cache
         @positions_cache = positions_cache
+        @quotes = quotes
+        @copies_cache = copies_cache
       end
 
       def call(env)
@@ -54,15 +58,23 @@ module ZeroXDA
 
       private
 
-      # Paper copy of a lead trader's real closed OKX positions; nothing is ordered.
+      # Paper copy of a lead trader's real closed OKX positions; nothing is ordered. Quoting a
+      # copy reads many candle pages, so a finished result is kept for the positions' lifetime.
       def copy_replay(document)
         valid = document.is_a?(Hash) && document["unique_code"].is_a?(String) && (document.keys - %w[unique_code options]).empty?
         return reply(422, error: "invalid_request") unless valid
         code = document["unique_code"]
         raise ArgumentError, "unique_code is invalid" unless OkxLeadTraders::UNIQUE_CODE.match?(code)
-        replay = CopyReplay.new(document.fetch("options", {}))
-        positions = @positions_cache.fetch(code) { @leaders.positions(code) }
-        reply(200, status: "ok", data: { "unique_code" => code }.merge(replay.call(positions)))
+        options = document.fetch("options", {})
+        replay = CopyReplay.new(options)
+        key = JSON.generate([code, options.transform_keys(&:to_s).sort])
+        data = @copies_cache.fetch(key) do
+          available = @positions_cache.fetch(code) { @leaders.positions(code) }
+          positions = replay.select(available)
+          quotes = replay.quoted? ? @quotes.call(positions, replay.delay_ms) : nil
+          { "unique_code" => code, "positions_available" => available.size }.merge(replay.call(positions, quotes))
+        end
+        reply(200, status: "ok", data: data)
       end
 
       # Read-only public leaderboard. Options are validated by OkxLeadTraders before any upstream call.
