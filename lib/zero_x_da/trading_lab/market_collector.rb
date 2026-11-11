@@ -162,8 +162,14 @@ module ZeroXDA
 
         # Ticks left over from a session the database could not take are written under that
         # session before a new one starts, so no tick is ever filed under the wrong connection.
+        # That session is then closed with the end time and reason it really had, not marked
+        # abandoned by the next open.
         def open_session(source, instruments, at)
-          drain if @session
+          if @session
+            drain
+            @ticks.close_session(@session, *@pending_close)
+            @session = @pending_close = nil
+          end
           @session = @ticks.open_session(source, instruments, at)
         end
 
@@ -184,11 +190,12 @@ module ZeroXDA
 
         def close_session(at, reason)
           return unless @session
+          @pending_close = [at, reason]
           flush(force: true)
           # Ticks still buffered belong to this session; keep it to write them after a reconnect.
           return unless @buffer.empty?
           @ticks.close_session(@session, at, reason)
-          @session = nil
+          @session = @pending_close = nil
         end
 
         private

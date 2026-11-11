@@ -258,6 +258,9 @@ class MarketCollectorTest < Minitest::Test
     flaky.down = false
     sink.open_session("okx.tickers", %w[BTC-USDT], T0 + 130)
     assert_equal [first], ticks.ticks("BTC-USDT", from: T0 + 121, to: T0 + 121).map { |row| row["session_id"] }
+    recovered = ticks.sessions.find { |session| session["id"] == first }
+    assert_equal ["connection lost", "2026-11-10T12:02:02.000000Z", 1], recovered.values_at("end_reason", "ended_at", "ticks"),
+                 "the outage does not turn the real disconnect into 'abandoned'"
     flaky.down = true
     overflow = Lab::MarketCollector::StoreSink::MAX_BUFFER
     tick = Tickers.ticks(frame, received_at: T0 + 131, instruments: %w[BTC-USDT]).first
