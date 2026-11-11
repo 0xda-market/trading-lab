@@ -11,6 +11,7 @@ require_relative "copy_replay"
 require_relative "copy_quotes"
 require_relative "research_store"
 require_relative "market_tick_store"
+require_relative "telegram_signal_store"
 
 module ZeroXDA
   module TradingLab
@@ -23,6 +24,8 @@ module ZeroXDA
       REPLAY_PATH = "/v1/paper/replays"
       RUNS_PATH = "/v1/research/runs"
       MARKET_SESSIONS_PATH = "/v1/market/sessions"
+      SIGNAL_RATINGS_PATH = "/v1/signals/telegram/ratings"
+      SIGNAL_MESSAGES_PATH = "/v1/signals/telegram/messages"
       RUN_PATH = %r{\A/v1/research/runs/([1-9]\d{0,17})\z}
       MAX_QUERY_BYTES = 512
 
@@ -44,7 +47,7 @@ module ZeroXDA
         route = [env["REQUEST_METHOD"], env["PATH_INFO"]]
         run_id = route.first == "GET" && RUN_PATH.match(route.last)&.captures&.first
         known = [["POST", REPLAY_PATH], ["GET", LEADERS_PATH], ["POST", COPY_PATH], ["GET", RUNS_PATH],
-                 ["GET", MARKET_SESSIONS_PATH]].include?(route)
+                 ["GET", MARKET_SESSIONS_PATH], ["GET", SIGNAL_RATINGS_PATH], ["GET", SIGNAL_MESSAGES_PATH]].include?(route)
         return reply(404, error: "not_found") unless known || run_id
         authorization = env["HTTP_AUTHORIZATION"].to_s
         provided = authorization.delete_prefix("Bearer ")
@@ -52,6 +55,7 @@ module ZeroXDA
         return stored_run(Integer(run_id, 10)) if run_id
         return stored_runs(env["QUERY_STRING"].to_s) if route.last == RUNS_PATH
         return market_sessions(env["QUERY_STRING"].to_s) if route.last == MARKET_SESSIONS_PATH
+        return signals(route.last, env["QUERY_STRING"].to_s) if [SIGNAL_RATINGS_PATH, SIGNAL_MESSAGES_PATH].include?(route.last)
         return leaders(env["QUERY_STRING"].to_s) if route.first == "GET"
         raw = env.fetch("rack.input").read(MAX_BYTES + 1)
         return reply(413, error: "payload_too_large") if raw.bytesize > MAX_BYTES
@@ -152,6 +156,24 @@ module ZeroXDA
         raise ArgumentError, "unknown or duplicate query parameter" unless pairs.map(&:first).then { |keys| keys.uniq == keys && (keys - %w[limit]).empty? }
         limit = pairs.empty? ? 20 : whole(pairs.first.last, "limit")
         reply(200, status: "ok", data: { "sessions" => MarketTickStore.new(@store).sessions(limit: limit) })
+      end
+
+      # Collected Telegram calls: per-channel accuracy, or one channel's posts with every revision.
+      def signals(path, raw_query)
+        raise ResearchStore::Unavailable, "no store" unless @store
+        return reply(414, error: "query_too_long") if raw_query.bytesize > MAX_QUERY_BYTES
+        pairs = URI.decode_www_form(raw_query)
+        query = pairs.to_h
+        allowed = path == SIGNAL_RATINGS_PATH ? [] : %w[channel limit]
+        raise ArgumentError, "unknown or duplicate query parameter" unless pairs.size == query.size && (query.keys - allowed).empty?
+        store = TelegramSignalStore.new(@store)
+        if allowed.empty?
+          lag = TelegramSignalStore::MAX_LAG_SECONDS
+          return reply(200, status: "ok", data: { "max_lag_seconds" => lag, "ratings" => store.ratings(max_lag_seconds: lag) })
+        end
+        channel = TelegramPreview.channel(query.fetch("channel") { raise ArgumentError, "channel is required" })
+        limit = query.key?("limit") ? whole(query["limit"], "limit") : 20
+        reply(200, status: "ok", data: { "messages" => store.messages(channel, limit: limit) })
       end
 
       def whole(value, name)

@@ -52,6 +52,7 @@ jobs:
           bundle exec ruby -Itest test/copy_quotes_test.rb
           bundle exec ruby -Itest test/research_store_test.rb
           bundle exec ruby -Itest test/market_collector_test.rb
+          bundle exec ruby -Itest test/telegram_signals_test.rb
       - name: Offline replay smoke
         run: bundle exec ruby bin/trading-lab replay examples/demo.jsonl
       - name: Research store migrations are idempotent from the CLI
