@@ -75,8 +75,10 @@ module ZeroXDA
       private
 
       # Paper copy of a lead trader's real closed OKX positions; nothing is ordered. Quoting a
-      # copy reads many candle pages, so a finished result is kept for the positions' lifetime
-      # and recorded once, when it is computed.
+      # copy reads many candle pages, so the computed result is cached for the positions'
+      # lifetime. Recording is kept out of that cached computation: a write that failed is
+      # retried by the next identical request instead of a null run_id being served for the
+      # whole TTL, and a write that succeeded is reused, so one computation is one row.
       def copy_replay(document)
         valid = document.is_a?(Hash) && document["unique_code"].is_a?(String) && (document.keys - %w[unique_code options experiment]).empty?
         return reply(422, error: "invalid_request") unless valid
@@ -86,17 +88,21 @@ module ZeroXDA
         options = document.fetch("options", {})
         replay = CopyReplay.new(options)
         key = JSON.generate([code, options.transform_keys(&:to_s).sort, experiment])
-        body = @copies_cache.fetch(key) do
+        entry = @copies_cache.fetch(key) do
           available = @positions_cache.fetch(code) { @leaders.positions(code) }
           positions = replay.select(available)
           quotes = replay.quoted? ? @quotes.call(positions, replay.delay_ms) : nil
           result = replay.call(positions, quotes)
           portfolio = { "ending_cash" => result["equity"], "equity" => result["equity"], "open_positions" => {} }
-          run = record(kind: "copy_replay", subject: code, options: options, input: positions, result: result,
-                       portfolio: portfolio, experiment: experiment)
-          { status: "ok", data: { "unique_code" => code, "positions_available" => available.size }.merge(result) }.merge(run)
+          { data: { "unique_code" => code, "positions_available" => available.size }.merge(result), lock: Mutex.new, run_id: nil,
+            run: { kind: "copy_replay", subject: code, options: options, input: positions, result: result, portfolio: portfolio, experiment: experiment } }
         end
-        reply(200, body)
+        run = entry[:lock].synchronize do
+          recorded = entry[:run_id] ? { run_id: entry[:run_id] } : record(**entry[:run])
+          entry[:run_id] ||= recorded[:run_id]
+          recorded
+        end
+        reply(200, { status: "ok", data: entry[:data] }.merge(run))
       end
 
       def experiment(document)

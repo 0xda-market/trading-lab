@@ -101,6 +101,31 @@ class ResearchStoreTest < Minitest::Test
     assert_equal 401, status
   end
 
+  # A copy replay whose write failed must not serve its null run_id for the cache's lifetime.
+  def test_a_cached_copy_replay_is_recorded_once_and_retried_after_a_failed_write
+    position = { "ccy" => "USDT", "closeAvgPx" => "110", "closeTime" => "1697698049031", "instId" => "BTC-USDT-SWAP", "instType" => "SWAP",
+                 "lever" => "20", "margin" => "1", "mgnMode" => "isolated", "openAvgPx" => "100", "openTime" => "1697698048031", "pnl" => "1",
+                 "pnlRatio" => "0.1", "posSide" => "long", "subPos" => "3", "subPosId" => "635126416883355648", "uniqueCode" => "9A8534AB09862774" }
+    transport = ->(_uri) { [200, JSON.generate("code" => "0", "msg" => "", "data" => [position])] }
+    leaders = Lab::OkxLeadTraders.new(transport: transport, clock: -> { 0.0 }, sleeper: ->(_) {}, throttle: { lock: Mutex.new, last_request_at: nil })
+    flaky = @store.dup
+    down = true
+    flaky.define_singleton_method(:record_run) do |**run|
+      raise Lab::ResearchStore::Unavailable, "research store is unreachable" if down
+      super(**run)
+    end
+    app = Lab::HTTPApp.new(token: "test-secret", leaders: leaders, store: flaky)
+    body = JSON.generate(unique_code: "9A8534AB09862774", options: { pricing: "leader" })
+    assert_equal [200, nil], call("POST", "/v1/paper/copy-replays", body: body, app: app).then { |status, reply| [status, reply["run_id"]] }
+    down = false
+    _, first = call("POST", "/v1/paper/copy-replays", body: body, app: app)
+    _, second = call("POST", "/v1/paper/copy-replays", body: body, app: app)
+    assert_kind_of Integer, first["run_id"]
+    assert_equal first["run_id"], second["run_id"], "one computation is one row"
+    assert_equal 1, @store.runs(kind: "copy_replay").size
+    assert_equal first["data"], second["data"]
+  end
+
   def test_service_keeps_simulating_when_the_store_is_absent_or_down
     plain = Lab::HTTPApp.new(token: "test-secret", store: nil)
     status, body = call("POST", "/v1/paper/replays", body: JSON.generate(events: EVENTS), app: plain)

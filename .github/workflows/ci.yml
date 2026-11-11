@@ -16,7 +16,8 @@ jobs:
   ruby:
     runs-on: ubuntu-latest
     timeout-minutes: 12
-    # Disposable database for the research store tests; the major version matches production.
+    # Disposable database for the research store tests, on the major version of
+    # 0xda-market's own production PostgreSQL (market-postgres-production, 18).
     services:
       postgres:
         image: postgres:18
