@@ -10,6 +10,7 @@ COPY config.ru ./
 COPY config/puma.rb config/puma.rb
 COPY lib/ lib/
 COPY db/ db/
+COPY bin/ bin/
 
 FROM ruby:3.3.11-slim
 WORKDIR /app

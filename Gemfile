@@ -5,4 +5,5 @@ ruby "3.3.11"
 gem "rack", "~> 3.2"
 gem "puma", "~> 7.2"
 gem "pg", "~> 1.6"
+gem "websocket-driver", "~> 0.8"
 gem "minitest", "~> 5.25", group: :test

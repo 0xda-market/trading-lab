@@ -53,13 +53,46 @@ def migrate(argv)
   puts applied.empty? ? "research store is up to date" : "applied #{applied.join(', ')}"
 end
 
+# Read-only and long-running: records public OKX ticker quotes until stopped. It needs no
+# key and can place no order. Ticks go to --output (JSONL), to the research store, or both.
+def collect_okx(argv)
+  require_relative "../lib/zero_x_da/trading_lab/market_collector"
+  require_relative "../lib/zero_x_da/trading_lab/market_tick_store"
+  lab = ZeroXDA::TradingLab
+  options = { instruments: [], min_interval_ms: 1000 }
+  parser = OptionParser.new do |p|
+    p.banner = "Usage: trading-lab collect-okx [options]"
+    p.on("--instrument ID", "repeatable; default #{lab::OkxTickers::DEFAULT_INSTRUMENTS.join(', ')}") { |value| options[:instruments] << value }
+    p.on("--output PATH", "append ticks as JSONL") { |value| options[:output] = value }
+    p.on("--min-interval-ms INTEGER", Integer, "keep at most one tick per instrument per interval") { |value| options[:min_interval_ms] = value }
+    p.on("--max-events INTEGER", Integer, "stop after this many kept ticks") { |value| options[:max_events] = value }
+  end
+  parser.parse!(argv)
+  raise ArgumentError, "unexpected arguments" unless argv.empty?
+  sinks = []
+  sinks << lab::MarketCollector::JsonlSink.new(options[:output]) if options[:output]
+  store = lab::ResearchStore.from_env
+  if store
+    store.migrate!
+    sinks << lab::MarketCollector::StoreSink.new(lab::MarketTickStore.new(store))
+  end
+  raise ArgumentError, "give --output or set #{lab::ResearchStore::URL_VARIABLE}" if sinks.empty?
+  stopping = false
+  %w[INT TERM].each { |signal| trap(signal) { stopping = true } }
+  instruments = options[:instruments].empty? ? lab::OkxTickers::DEFAULT_INSTRUMENTS : options[:instruments]
+  count = lab::MarketCollector.new(sinks: sinks, instruments: instruments, min_interval_ms: options[:min_interval_ms],
+                                   max_events: options[:max_events], stop: -> { stopping }).run
+  warn "market collector: kept #{count} ticks"
+end
+
 command = ARGV.shift
 begin
   case command
   when "replay" then replay(ARGV)
   when "okx-leaders" then okx_leaders(ARGV)
   when "migrate" then migrate(ARGV)
-  else raise ArgumentError, "expected replay PATH, okx-leaders or migrate"
+  when "collect-okx" then collect_okx(ARGV)
+  else raise ArgumentError, "expected replay PATH, okx-leaders, migrate or collect-okx"
   end
 rescue ArgumentError, OptionParser::ParseError, JSON::ParserError, Errno::ENOENT => error
   warn "#{command || 'trading-lab'} error: #{error.message}"
@@ -70,4 +103,9 @@ rescue ZeroXDA::TradingLab::OkxLeadTraders::Error => error
 rescue ZeroXDA::TradingLab::ResearchStore::Unavailable => error
   warn "store error: #{error.message}"
   exit 4
+rescue StandardError => error
+  # A collector stopped by a rejected subscription, a backwards clock or a full buffer.
+  raise unless command == "collect-okx"
+  warn "collector error: #{error.message}"
+  exit 5
 end

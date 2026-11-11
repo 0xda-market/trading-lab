@@ -112,6 +112,25 @@ The store holds paper results only: no balance, order or credential. It uses the
 
 **Not deployed yet.** Neither infra workload sets `TRADING_LAB_DATABASE_URL`, so development and production keep running without persistence until a database is allocated in `aiaiaiai-org/infra` and the variable is added to the secret envelope. That is a separate, reviewed change.
 
+## Market data collector (OKX, read-only)
+
+`collect-okx` is a long-running process that records live quotes from the public OKX [`tickers`](https://www.okx.com/docs-v5/en/#order-book-trading-market-data-ws-tickers-channel) WebSocket channel. It logs in nowhere, holds no key and can place no order. It replaces the Python Binance collector of the closed PR #2 and keeps that collector's contract.
+
+```sh
+bundle exec ruby bin/trading-lab collect-okx --output data/ticks.jsonl --max-events 10
+TRADING_LAB_DATABASE_URL=postgres://... bundle exec ruby bin/trading-lab collect-okx
+```
+
+- **Instruments.** Default `BTC-USDT`, `ETH-USDT`, `BTC-USDT-SWAP`, `ETH-USDT-SWAP`; repeat `--instrument` for others (at most 10).
+- **Sinks.** `--output` appends JSONL in the paper replay's tick format; with `TRADING_LAB_DATABASE_URL` ticks also go to `trading_lab.market_ticks`. At least one is required.
+- **Causal time.** `received_at` is the collector's own clock at receipt. OKX's `ts` is stored separately as `exchange_event_at` and never used as the causal time, because a later simulation could then see a quote before the lab had it. The collector stops if its clock steps backwards.
+- **Sampling.** The channel pushes up to ten updates a second. `--min-interval-ms` (default 1000) keeps at most one tick per instrument per interval, always the first one seen. That is about 86,400 rows per instrument per day.
+- **Gaps are recorded, not hidden.** Each connection is one row in `market_stream_sessions` with its start, end and end reason. The collector reconnects with backoff (1 s to 30 s) and never backfills, so the time between two sessions is a gap with no observations. A session a crashed process left open is closed at its last tick. `GET /v1/market/sessions?limit=` lists sessions, newest first.
+- **Database outage.** Ticks wait in memory (up to 20,000) and are written under their own session once the database is back. Past that the collector exits instead of dropping what it observed.
+- **What it is not.** A ticker carries the last trade and the best bid and ask, not every trade and not order book depth. The copy replay still prices from one-minute candles; reading these ticks instead is a separate change.
+
+**Not deployed yet.** The collector needs its own long-running workload (the same image with the command `bundle exec ruby bin/trading-lab collect-okx`) and a database. Both are infra changes.
+
 ## Production release via infra
 
 The canonical repository is [`0xda-market/trading-lab`](https://github.com/0xda-market/trading-lab), with default branch `master`. Production is **manual-only** and takes two separate steps. This repository holds no infra token.
