@@ -26,8 +26,6 @@ module ZeroXDA
       MARKET_SESSIONS_PATH = "/v1/market/sessions"
       SIGNAL_RATINGS_PATH = "/v1/signals/telegram/ratings"
       SIGNAL_MESSAGES_PATH = "/v1/signals/telegram/messages"
-      # Must match the collector's rating, or the two would disagree on which calls are late.
-      SIGNAL_MAX_LAG_SECONDS = 300
       RUN_PATH = %r{\A/v1/research/runs/([1-9]\d{0,17})\z}
       MAX_QUERY_BYTES = 512
 
@@ -169,7 +167,10 @@ module ZeroXDA
         allowed = path == SIGNAL_RATINGS_PATH ? [] : %w[channel limit]
         raise ArgumentError, "unknown or duplicate query parameter" unless pairs.size == query.size && (query.keys - allowed).empty?
         store = TelegramSignalStore.new(@store)
-        return reply(200, status: "ok", data: { "max_lag_seconds" => SIGNAL_MAX_LAG_SECONDS, "ratings" => store.ratings(max_lag_seconds: SIGNAL_MAX_LAG_SECONDS) }) if allowed.empty?
+        if allowed.empty?
+          lag = TelegramSignalStore::MAX_LAG_SECONDS
+          return reply(200, status: "ok", data: { "max_lag_seconds" => lag, "ratings" => store.ratings(max_lag_seconds: lag) })
+        end
         channel = TelegramPreview.channel(query.fetch("channel") { raise ArgumentError, "channel is required" })
         limit = query.key?("limit") ? whole(query["limit"], "limit") : 20
         reply(200, status: "ok", data: { "messages" => store.messages(channel, limit: limit) })

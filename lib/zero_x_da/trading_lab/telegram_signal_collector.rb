@@ -70,7 +70,7 @@ module ZeroXDA
         @backfill.times do
           page = @preview.page(channel, before: before)
           break if page.empty?
-          @signals.record_page(channel, page, @clock.call)
+          @signals.record_page(channel, page, @clock.call, backfill: true)
           before = page.first["message_id"]
           break if before <= 1
         end

@@ -133,6 +133,21 @@ class TelegramSignalsTest < Minitest::Test
     assert_equal ["expired", "-0.05"], expired.values_at("outcome", "return"), "short from the 12:02 open at 100 to the 105 close"
   end
 
+  # Bars that stop short of the horizon cannot prove an expiry, and an outcome is final.
+  def test_a_call_whose_bars_end_early_is_unquoted_not_expired
+    signals = store
+    signals.record_page("alpha_calls", [post(1, LONG_CALL)], T0 + 10)
+    halted = Class.new(FakeCandles) do
+      def range(instrument, bar, from_ms, to_ms)
+        super.select { |row| row["start_ms"] < from_ms + 20 * 60_000 }
+      end
+    end.new(T0_MS => "100")
+    rating(signals, halted, T0 + 3600 + 300).evaluate_pending
+    outcome = signals.messages("alpha_calls").first["revisions"].first.dig("signal", "outcome")
+    assert_equal "no_quote", outcome
+    assert_equal [0, 1, nil], signals.ratings(max_lag_seconds: 300).first.values_at("expired", "no_quote", "accuracy")
+  end
+
   def test_a_winning_call_counts_and_a_later_edit_cannot_rewrite_it
     signals = store
     signals.record_page("alpha_calls", [post(1, "#BTC LONG entry 100 SL 90 TP 110")], T0 + 10)
@@ -163,6 +178,10 @@ class TelegramSignalsTest < Minitest::Test
                                                  clock: -> { now += 10 }, sleeper: ->(_) { cycles += 1 }, stop: -> { cycles >= 1 }, log: ->(line) { log << line })
     collector.run
     assert_equal 1, cycles, "it sleeps between cycles until stopped"
+    first, = signals.messages("alpha_calls").last(1)
+    assert_equal [1, true], first.values_at("message_id", "backfilled"), "found by the backfill, though only seconds old"
+    assert_equal [false], signals.messages("alpha_calls", limit: 1).map { |message| message["backfilled"] }
+    assert_raises(Lab::ResearchStore::Unavailable) { @research.with { |db| db.exec("UPDATE trading_lab.telegram_messages SET backfilled = false") } }
     assert_includes log, "telegram collector: broken_chan: broken_chan has no public preview"
     assert_equal [2, 1], signals.messages("alpha_calls").map { |message| message["message_id"] }
     assert_raises(ArgumentError) { Lab::TelegramSignalCollector.new(channels: [], signals: signals) }
@@ -176,8 +195,8 @@ class TelegramSignalsTest < Minitest::Test
       [status, JSON.parse(body.join)]
     end
     status, body = get.call("/v1/signals/telegram/ratings")
-    assert_equal [200, 300, [["alpha_calls", 2, 1, 1]]],
-                 [status, body.dig("data", "max_lag_seconds"), body.dig("data", "ratings").map { |row| row.values_at("channel", "messages", "calls", "pending") }]
+    assert_equal [200, 300, [["alpha_calls", 2, 1, 0, 1]]],
+                 [status, body.dig("data", "max_lag_seconds"), body.dig("data", "ratings").map { |row| row.values_at("channel", "messages", "calls", "pending", "late") }]
     status, body = get.call("/v1/signals/telegram/messages", "channel=%40Alpha_Calls&limit=1")
     assert_equal [200, [2]], [status, body.dig("data", "messages").map { |message| message["message_id"] }]
     assert_equal 422, get.call("/v1/signals/telegram/messages").first

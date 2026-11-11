@@ -16,15 +16,17 @@ module ZeroXDA
     class TelegramSignalStore
       S = ResearchStore::SCHEMA
       OUTCOMES = %w[target stop expired missed no_quote].freeze
+      # A call first seen later than this after it was published is not rated.
+      MAX_LAG_SECONDS = 300
       # The call a message is judged by: the first of its revisions that carried a signal.
       # Whatever the channel changed afterwards cannot improve its record.
       CALLS = "SELECT DISTINCT ON (r.message_ref) r.message_ref, r.revision, r.kind, r.observed_at, s.id AS signal_id, " \
-              "m.channel, m.message_id, m.published_at FROM #{S}.telegram_signals s " \
+              "m.channel, m.message_id, m.published_at, m.backfilled FROM #{S}.telegram_signals s " \
               "JOIN #{S}.telegram_message_revisions r ON r.id = s.revision_id " \
               "JOIN #{S}.telegram_messages m ON m.id = r.message_ref ORDER BY r.message_ref, r.revision"
-      # An original first seen long after it was published (a backfill, or a collector that
-      # was down) cannot be rated: nobody knows what the post said when it was new.
-      LATE = "c.kind = 'original' AND c.observed_at - c.published_at > make_interval(secs => $1)"
+      # An original first seen long after it was published (a collector that was down), or
+      # found by a backfill at all, cannot be rated: nobody knows what it said when it was new.
+      LATE = "(c.backfilled OR (c.kind = 'original' AND c.observed_at - c.published_at > make_interval(secs => $1)))"
 
       def initialize(store, parser: SignalParser)
         @store = store
@@ -33,7 +35,8 @@ module ZeroXDA
 
       # Stores what one preview page showed at `observed_at`: new posts, changed text as an
       # edit, and a known post that vanished from between its neighbours as a deletion.
-      def record_page(channel, messages, observed_at)
+      # Posts first seen through a `backfill` are marked so that they are never rated.
+      def record_page(channel, messages, observed_at, backfill: false)
         counts = { "new" => 0, "edited" => 0, "deleted" => 0, "signals" => 0 }
         return counts if messages.empty?
         ids = messages.map { |message| message.fetch("message_id") }
@@ -50,8 +53,9 @@ module ZeroXDA
               digest = Digest::SHA256.hexdigest(message.fetch("text"))
               seen = known.delete(message["message_id"])
               if seen.nil?
-                ref = db.exec_params("INSERT INTO #{S}.telegram_messages (channel, message_id, published_at, first_seen_at) " \
-                                     "VALUES ($1, $2, $3, $4) RETURNING id", [channel, message["message_id"], message.fetch("published_at"), at]).first["id"]
+                ref = db.exec_params("INSERT INTO #{S}.telegram_messages (channel, message_id, published_at, first_seen_at, backfilled) " \
+                                     "VALUES ($1, $2, $3, $4, $5) RETURNING id",
+                                     [channel, message["message_id"], message.fetch("published_at"), at, backfill ? "t" : "f"]).first["id"]
                 counts["signals"] += revise(db, ref, 1, "original", at, message, digest)
                 counts["new"] += 1
               elsif seen["kind"] == "deleted" || seen["text_digest"] != digest
@@ -118,7 +122,7 @@ module ZeroXDA
       def messages(channel, limit: 20)
         raise ArgumentError, "limit must be between 1 and #{ResearchStore::MAX_PAGE}" unless limit.is_a?(Integer) && (1..ResearchStore::MAX_PAGE).cover?(limit)
         @store.with do |db|
-          posts = db.exec_params("SELECT id, message_id, published_at, first_seen_at FROM #{S}.telegram_messages WHERE channel = $1 " \
+          posts = db.exec_params("SELECT id, message_id, published_at, first_seen_at, backfilled FROM #{S}.telegram_messages WHERE channel = $1 " \
                                  "ORDER BY message_id DESC LIMIT $2", [channel, limit]).to_a
           revisions = db.exec_params(
             "SELECT r.message_ref, r.revision, r.kind, r.observed_at, r.marked_edited, r.text, s.instrument, s.side, s.entry_low, s.entry_high, " \
@@ -128,7 +132,8 @@ module ZeroXDA
           ).group_by { |row| row["message_ref"] }
           posts.map do |post|
             { "channel" => channel, "message_id" => Integer(post["message_id"], 10), "published_at" => stamp(post["published_at"]),
-              "first_seen_at" => stamp(post["first_seen_at"]), "revisions" => revisions.fetch(post["id"], []).map { |row| revision(row) } }
+              "first_seen_at" => stamp(post["first_seen_at"]),
+              "backfilled" => post["backfilled"] == "t", "revisions" => revisions.fetch(post["id"], []).map { |row| revision(row) } }
           end
         end
       end

@@ -10,6 +10,9 @@ CREATE TABLE trading_lab.telegram_messages (
   message_id bigint NOT NULL CHECK (message_id > 0),
   published_at timestamptz NOT NULL,
   first_seen_at timestamptz NOT NULL,
+  -- First seen while reading older pages at start-up rather than while polling: kept as
+  -- evidence, never rated, whatever its timestamps say.
+  backfilled boolean NOT NULL,
   UNIQUE (channel, message_id)
 );
 
@@ -54,6 +57,8 @@ CREATE TABLE trading_lab.telegram_signal_outcomes (
   return numeric
 );
 
+CREATE TRIGGER telegram_messages_append_only BEFORE UPDATE OR DELETE ON trading_lab.telegram_messages
+  FOR EACH ROW EXECUTE FUNCTION trading_lab.reject_change();
 CREATE TRIGGER telegram_message_revisions_append_only BEFORE UPDATE OR DELETE ON trading_lab.telegram_message_revisions
   FOR EACH ROW EXECUTE FUNCTION trading_lab.reject_change();
 CREATE TRIGGER telegram_signals_append_only BEFORE UPDATE OR DELETE ON trading_lab.telegram_signals

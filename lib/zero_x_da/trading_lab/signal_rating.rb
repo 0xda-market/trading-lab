@@ -5,6 +5,7 @@
 require "bigdecimal"
 require "time"
 require_relative "okx_candles"
+require_relative "telegram_signal_store"
 
 module ZeroXDA
   module TradingLab
@@ -23,7 +24,8 @@ module ZeroXDA
       TOLERANCE_BARS = 5
       MAX_HORIZON_HOURS = 168
 
-      def initialize(signals:, candles: OkxCandles.new, clock: -> { Time.now.utc }, horizon_hours: 24, delay_seconds: 5, max_lag_seconds: 300)
+      def initialize(signals:, candles: OkxCandles.new, clock: -> { Time.now.utc }, horizon_hours: 24, delay_seconds: 5,
+                     max_lag_seconds: TelegramSignalStore::MAX_LAG_SECONDS)
         raise ArgumentError, "horizon_hours must be 1..#{MAX_HORIZON_HOURS}" unless horizon_hours.is_a?(Integer) && (1..MAX_HORIZON_HOURS).cover?(horizon_hours)
         raise ArgumentError, "delay_seconds must be 0..3600" unless delay_seconds.is_a?(Integer) && (0..3600).cover?(delay_seconds)
         raise ArgumentError, "max_lag_seconds must be 1..86400" unless max_lag_seconds.is_a?(Integer) && (1..86_400).cover?(max_lag_seconds)
@@ -67,7 +69,11 @@ module ZeroXDA
           return close(result, "stop", bar["start_ms"], stop, entry, long) if stop && (long ? bar["low"] <= stop : bar["high"] >= stop)
           return close(result, "target", bar["start_ms"], target, entry, long) if target && (long ? bar["high"] >= target : bar["low"] <= target)
         end
+        # An expiry is a claim about the whole horizon. When the bars stop short of its end
+        # (a halted or delisted market) nobody knows how the call would have ended, and an
+        # outcome is written only once, so it is recorded as unquoted rather than expired.
         last = bars.last
+        return result.merge("outcome" => "no_quote") if last["start_ms"] < first + (@horizon * 60 - TOLERANCE_BARS) * MINUTE
         close(result, "expired", last["start_ms"] + MINUTE, last["close"], entry, long)
       rescue OkxPublic::UnknownInstrument
         { "outcome" => "no_quote" }
