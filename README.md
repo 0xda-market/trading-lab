@@ -74,20 +74,29 @@ other upstream failures return 502 `upstream_unavailable`.
 
 `POST /v1/paper/copy-replays` with `{"unique_code":"<OKX lead trader code>","options":{...}}` simulates copying that trader's **real** closed positions from the last 3 months. The positions come from the public OKX endpoint [`public-subpositions-history`](https://www.okx.com/docs-v5/en/#order-book-trading-copy-trading-get-lead-trader-lead-position-history), up to 3 pages of 100, cached for 5 minutes per trader.
 
-Model (`CopyReplay`):
+Model (`CopyReplay`, default `pricing: "quotes"`):
 - Every leader position is copied with a fixed, **unlevered** USDT notional (`trade_notional`).
-- Entry and exit use the leader's real average open and close prices, each moved against the follower by `slippage_bps`. A fee of `fee_bps` is charged on both sides.
-- Opens and closes run in time order. A copy is rejected when free cash or the `max_exposure` share of equity cannot cover it. A copy loses at most its notional.
-- Defaults: `starting_cash` 1000, `trade_notional` 100, `fee_bps` 10, `slippage_bps` 5, `max_exposure` 1.
+- A signal exists at the leader's open or close time. The follower acts `follower_delay_seconds` later and is filled at the open of the first completed one-minute OKX bar that starts at or after that moment (`CopyQuotes`, public [`history-candles`](https://www.okx.com/docs-v5/en/#order-book-trading-market-data-get-candlesticks-history)). The leader's own fill price is never used, so a fill can lag its signal by the delay plus up to one minute. That quote is then moved against the follower by `slippage_bps`, and `fee_bps` is charged on both sides.
+- Open copies are marked to market on every bar between entry and exit. `max_drawdown` is measured on that marked equity, taking each open copy at its worst price of the bar; `max_drawdown_realized` is the old closed-trade figure, kept for comparison. `mark_bar` names the bar size used: one minute when the request budget allows, coarser (up to `4H`) for long holds.
+- Opens, closes and marks run in time order. A copy is rejected when free cash or the `max_exposure` share of equity cannot cover it, or when the market has no quote for it (`no_quote`: a delisted instrument, or no bar within 5 minutes). A copy is liquidated when its mark reaches zero, so it loses at most its notional.
+- Only the most recent `max_positions` positions are replayed (default 100, at most 300); `positions_available` reports how many OKX returned.
+- Defaults: `starting_cash` 1000, `trade_notional` 100, `fee_bps` 10, `slippage_bps` 5, `max_exposure` 1, `follower_delay_seconds` 5 (0–3600).
 
 The result includes:
 - equity, net PnL, return, fees and win rate;
-- maximum drawdown on realized equity;
-- copied and rejected counts;
-- `baseline_pnl`, the same copies without costs, and `cost_drag`;
-- the per-trade list.
+- `max_drawdown` (marked) and `max_drawdown_realized`;
+- copied, rejected and liquidated counts;
+- `baseline_pnl`, the same copies at the leader's prices without costs; `delay_drag`, the part of it lost between the leader's fill and the follower's quote; and `cost_drag`, everything lost to delay, slippage and fees;
+- the per-trade list with the leader's prices next to the follower's fills and fill times.
 
-The leader's own leverage is not applied, so the leaderboard's levered returns are not comparable one to one. Follower delay is not modelled yet: entries use the leader's fill prices. It is paper only, with no orders.
+`pricing: "leader"` keeps the earlier optimistic model, which fills at the leader's average prices and has no price path. Use it only to see how much that assumption flatters a trader.
+
+Limits of the model:
+- The leader's own leverage is not applied, so the leaderboard's levered returns are not comparable one to one.
+- One-minute bars are the finest public history: the fill is the next minute's open, not a tick, and order book depth is not modelled beyond `slippage_bps`.
+- Within a bar all open copies are taken at their worst price together, and the bars at the edges of a holding interval count in full. Both can only overstate the drawdown.
+- A quoted replay reads up to 120 candle pages from OKX (20 requests per 2 s per IP), so the first call for a trader can take tens of seconds; the result is cached for 5 minutes. When the positions need more pages than that, the call returns 422 and asks for a lower `max_positions`.
+- It is paper only, with no orders.
 
 ## Production release via infra
 

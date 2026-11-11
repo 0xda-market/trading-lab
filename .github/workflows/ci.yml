@@ -32,6 +32,8 @@ jobs:
           bundle exec ruby -Itest test/leaders_http_test.rb
           bundle exec ruby -Itest test/copy_replay_test.rb
           bundle exec ruby -Itest test/okx_positions_test.rb
+          bundle exec ruby -Itest test/okx_candles_test.rb
+          bundle exec ruby -Itest test/copy_quotes_test.rb
       - name: Offline replay smoke
         run: bundle exec ruby bin/trading-lab replay examples/demo.jsonl
 
