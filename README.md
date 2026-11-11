@@ -131,6 +131,42 @@ TRADING_LAB_DATABASE_URL=postgres://... bundle exec ruby bin/trading-lab collect
 
 **Not deployed yet.** The collector needs its own long-running workload (the same image with the command `bundle exec ruby bin/trading-lab collect-okx`) and a database. Both are infra changes.
 
+## Telegram signal collector and channel accuracy (read-only)
+
+`collect-telegram` watches public Telegram trading channels, keeps every version of their posts and rates their calls against the market that followed.
+
+```sh
+TRADING_LAB_DATABASE_URL=postgres://... bundle exec ruby bin/trading-lab collect-telegram --channel some_channel --channel another_one
+```
+
+**Source and access.** It reads the public web preview `https://t.me/s/<channel>`, the page Telegram serves to anyone without an account. There is no bot token, phone number or session, so the lab holds no Telegram credential. Private channels and channels that disabled the preview cannot be read. Channels come from `--channel` (repeatable, at most 20) and `TRADING_LAB_TELEGRAM_CHANNELS` (comma-separated). It needs the research store.
+
+**Three layers, all append-only.**
+1. *Raw posts* (`telegram_messages`, `telegram_message_revisions`). Each observed state of a post is one immutable revision: `original`, `edit` or `deleted`, with the text, Telegram's own "edited" mark and `observed_at`, the lab's clock when it first saw that state.
+2. *Signal candidates* (`telegram_signals`). `SignalParser` reads a revision deterministically: one marked ticker (`#BTC`, `$BTC`, `BTCUSDT`, `BTC/USDT`), one direction, and optional entry, stop and targets, in English, Ukrainian or Russian keywords. An opinion, two tickers, both directions or levels that contradict the direction give no signal. The parser version is stored with each signal.
+3. *Outcomes* (`telegram_signal_outcomes`). One final row per rated call.
+
+**How a call is rated** (`SignalRating`).
+- A post is judged by the **first** revision that carried a signal. Later edits and deletions are counted (`edited_after`, `deleted_after`) but cannot change the record.
+- The entry is the open of the first completed one-minute OKX bar after `observed_at` plus `--delay-seconds` (default 5), the same causal rule as the copy replay.
+- The bars are walked for `--horizon-hours` (default 24). The stop or the nearest target, whichever comes first, decides the call; a bar that touches both counts as the stop. With neither, the call `expired` at the horizon's last close.
+- `missed`: the price had already passed the stop or the target before the call could be read. `no_quote`: OKX lists no such swap or has no bar.
+- A call is rated only once its whole horizon is history, so an outcome never depends on when the rating ran.
+- A post first seen more than 5 minutes after it was published (a backfill, or a collector that was down) is `late` and never rated.
+- `return` is the raw price move in the call's direction, without fees or slippage. It measures whether the channel was right, not what a follower would have earned.
+
+**Reading it.** `GET /v1/signals/telegram/ratings` returns one row per channel: `messages`, `calls`, the outcome counts, `rated`, `pending`, `late`, `edited_after`, `deleted_after`, `average_return` and `accuracy` (targets hit over targets plus stops hit; null until a call resolved either way). `GET /v1/signals/telegram/messages?channel=&limit=` returns a channel's newest posts with every revision, its signal and outcome.
+
+**Limits.**
+- An edit is seen at the next poll (`--interval-seconds`, default 60, minimum 15), not when it happened, and only while the post is on the newest page of about 20 posts. Several edits between two polls collapse into one. A deletion is recorded when a known post vanishes from between its neighbours.
+- `--backfill-pages N` stores the newest N pages once at start, as history only.
+- The parser reads text. A call posted as an image is not seen, and a format it does not know gives no signal rather than a guess.
+- All calls are priced on `<BASE>-USDT-SWAP` at OKX, whatever venue the channel meant.
+- A small `rated` count says little; the table reports it so the accuracy is never read without it.
+- The page markup is Telegram's and can change. A post without a timestamp fails loudly instead of being stored half-read.
+
+**Not deployed yet.** Like the market collector, it needs its own long-running workload and a database, and its host must be allowed to reach `t.me`.
+
 ## Production release via infra
 
 The canonical repository is [`0xda-market/trading-lab`](https://github.com/0xda-market/trading-lab), with default branch `master`. Production is **manual-only** and takes two separate steps. This repository holds no infra token.

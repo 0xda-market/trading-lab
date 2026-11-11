@@ -6,4 +6,5 @@ gem "rack", "~> 3.2"
 gem "puma", "~> 7.2"
 gem "pg", "~> 1.6"
 gem "websocket-driver", "~> 0.8"
+gem "nokogiri", "~> 1.18"
 gem "minitest", "~> 5.25", group: :test

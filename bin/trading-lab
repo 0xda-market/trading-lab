@@ -7,6 +7,7 @@ require "optparse"
 require_relative "../lib/zero_x_da/trading_lab/replay"
 require_relative "../lib/zero_x_da/trading_lab/okx_lead_traders"
 require_relative "../lib/zero_x_da/trading_lab/research_store"
+require_relative "../lib/zero_x_da/trading_lab/http_app"
 
 def replay(argv)
   options = {}
@@ -85,6 +86,36 @@ def collect_okx(argv)
   warn "market collector: kept #{count} ticks"
 end
 
+# Read-only and long-running: watches the public web preview of Telegram channels, keeps
+# every revision of their posts and rates their calls. It needs no Telegram credential.
+def collect_telegram(argv)
+  require_relative "../lib/zero_x_da/trading_lab/telegram_signal_collector"
+  lab = ZeroXDA::TradingLab
+  options = { channels: ENV.fetch("TRADING_LAB_TELEGRAM_CHANNELS", "").split(","), interval_seconds: 60, backfill_pages: 0, horizon_hours: 24, delay_seconds: 5 }
+  parser = OptionParser.new do |p|
+    p.banner = "Usage: trading-lab collect-telegram --channel NAME [options]"
+    p.on("--channel NAME", "public channel username; repeatable") { |value| options[:channels] << value }
+    p.on("--interval-seconds INTEGER", Integer, "pause between polling cycles (default 60)") { |value| options[:interval_seconds] = value }
+    p.on("--backfill-pages INTEGER", Integer, "older pages to store once at start; never rated") { |value| options[:backfill_pages] = value }
+    p.on("--horizon-hours INTEGER", Integer, "how long a call has to reach its target (default 24)") { |value| options[:horizon_hours] = value }
+    p.on("--delay-seconds INTEGER", Integer, "follower delay before the entry quote (default 5)") { |value| options[:delay_seconds] = value }
+    p.on("--once", "run one cycle and exit") { options[:once] = true }
+  end
+  parser.parse!(argv)
+  raise ArgumentError, "unexpected arguments" unless argv.empty?
+  store = lab::ResearchStore.from_env
+  raise ArgumentError, "#{lab::ResearchStore::URL_VARIABLE} is not set" unless store
+  store.migrate!
+  signals = lab::TelegramSignalStore.new(store)
+  rating = lab::SignalRating.new(signals: signals, horizon_hours: options[:horizon_hours], delay_seconds: options[:delay_seconds],
+                                 max_lag_seconds: lab::HTTPApp::SIGNAL_MAX_LAG_SECONDS)
+  stopping = false
+  %w[INT TERM].each { |signal| trap(signal) { stopping = true } }
+  collector = lab::TelegramSignalCollector.new(channels: options[:channels], signals: signals, rating: rating, interval_seconds: options[:interval_seconds],
+                                               backfill_pages: options[:backfill_pages], stop: -> { stopping })
+  collector.run(once: options[:once] == true)
+end
+
 command = ARGV.shift
 begin
   case command
@@ -92,7 +123,8 @@ begin
   when "okx-leaders" then okx_leaders(ARGV)
   when "migrate" then migrate(ARGV)
   when "collect-okx" then collect_okx(ARGV)
-  else raise ArgumentError, "expected replay PATH, okx-leaders, migrate or collect-okx"
+  when "collect-telegram" then collect_telegram(ARGV)
+  else raise ArgumentError, "expected replay PATH, okx-leaders, migrate, collect-okx or collect-telegram"
   end
 rescue ArgumentError, OptionParser::ParseError, JSON::ParserError, Errno::ENOENT => error
   warn "#{command || 'trading-lab'} error: #{error.message}"
