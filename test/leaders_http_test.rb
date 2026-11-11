@@ -80,6 +80,23 @@ class LeadersHTTPTest < Minitest::Test
     assert_equal 3, @requests.size
   end
 
+  def test_concurrent_misses_compute_once_and_share_failures
+    cache = ZeroXDA::TradingLab::LeaderboardCache.new(clock: -> { 0.0 })
+    gate = Queue.new
+    calls = 0
+    threads = 4.times.map { Thread.new { cache.fetch("k") { calls += 1; gate.pop; "v" } } }
+    sleep 0.05 until threads.count { |thread| thread.status == "sleep" } == 4
+    gate << :go
+    assert_equal ["v"] * 4, threads.map(&:value)
+    assert_equal 1, calls
+
+    failing = 3.times.map { Thread.new { cache.fetch("e") { gate.pop; raise ArgumentError, "upstream" } } }
+    sleep 0.05 until failing.count { |thread| thread.status == "sleep" } == 3
+    gate << :go
+    failing.each { |thread| assert_raises(ArgumentError) { thread.value } }
+    assert_equal "again", cache.fetch("e") { "again" }, "a failure is not cached"
+  end
+
   def test_cache_is_bounded
     cache = ZeroXDA::TradingLab::LeaderboardCache.new(max_entries: 2, clock: -> { 0.0 })
     calls = 0
