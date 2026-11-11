@@ -6,6 +6,7 @@ require "json"
 require "optparse"
 require_relative "../lib/zero_x_da/trading_lab/replay"
 require_relative "../lib/zero_x_da/trading_lab/okx_lead_traders"
+require_relative "../lib/zero_x_da/trading_lab/research_store"
 
 def replay(argv)
   options = {}
@@ -43,12 +44,22 @@ def okx_leaders(argv)
   puts JSON.pretty_generate(ZeroXDA::TradingLab::OkxLeadTraders.new.ranks(options))
 end
 
+# Applies pending research store migrations to TRADING_LAB_DATABASE_URL.
+def migrate(argv)
+  raise ArgumentError, "unexpected arguments" unless argv.empty?
+  store = ZeroXDA::TradingLab::ResearchStore.from_env
+  raise ArgumentError, "#{ZeroXDA::TradingLab::ResearchStore::URL_VARIABLE} is not set" unless store
+  applied = store.migrate!
+  puts applied.empty? ? "research store is up to date" : "applied #{applied.join(', ')}"
+end
+
 command = ARGV.shift
 begin
   case command
   when "replay" then replay(ARGV)
   when "okx-leaders" then okx_leaders(ARGV)
-  else raise ArgumentError, "expected replay PATH or okx-leaders"
+  when "migrate" then migrate(ARGV)
+  else raise ArgumentError, "expected replay PATH, okx-leaders or migrate"
   end
 rescue ArgumentError, OptionParser::ParseError, JSON::ParserError, Errno::ENOENT => error
   warn "#{command || 'trading-lab'} error: #{error.message}"
@@ -56,4 +67,7 @@ rescue ArgumentError, OptionParser::ParseError, JSON::ParserError, Errno::ENOENT
 rescue ZeroXDA::TradingLab::OkxLeadTraders::Error => error
   warn "okx error: #{error.message}"
   exit 3
+rescue ZeroXDA::TradingLab::ResearchStore::Unavailable => error
+  warn "store error: #{error.message}"
+  exit 4
 end

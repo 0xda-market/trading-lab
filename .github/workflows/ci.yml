@@ -16,6 +16,22 @@ jobs:
   ruby:
     runs-on: ubuntu-latest
     timeout-minutes: 12
+    # Disposable database for the research store tests, on the major version of
+    # 0xda-market's own production PostgreSQL (market-postgres-production, 18).
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: lab
+          POSTGRES_PASSWORD: ci-only
+          POSTGRES_DB: trading_lab_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U lab -d trading_lab_test"
+          --health-interval 5s --health-timeout 5s --health-retries 12
+    env:
+      TRADING_LAB_TEST_DATABASE_URL: postgres://lab:ci-only@127.0.0.1:5432/trading_lab_test
     steps:
       - uses: actions/checkout@v4
       - uses: ruby/setup-ruby@v1
@@ -34,8 +50,15 @@ jobs:
           bundle exec ruby -Itest test/okx_positions_test.rb
           bundle exec ruby -Itest test/okx_candles_test.rb
           bundle exec ruby -Itest test/copy_quotes_test.rb
+          bundle exec ruby -Itest test/research_store_test.rb
       - name: Offline replay smoke
         run: bundle exec ruby bin/trading-lab replay examples/demo.jsonl
+      - name: Research store migrations are idempotent from the CLI
+        env:
+          TRADING_LAB_DATABASE_URL: ${{ env.TRADING_LAB_TEST_DATABASE_URL }}
+        run: |
+          bundle exec ruby bin/trading-lab migrate
+          bundle exec ruby bin/trading-lab migrate | grep -Fx "research store is up to date"
 
   # Automatic development delivery (aiaiaiai-org/infra docs/automatic-delivery.md).
   # Runs only for a master push whose tests passed above. Infra verifies both
