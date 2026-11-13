@@ -1,9 +1,11 @@
 # © 2026 aiaiaiai · aiaiaiai.org
 # SPDX-License-Identifier: MIT
 
-# Publishes a production release candidate for workload market-trading-lab without any
-# infra credential. Activation stays a separate, manual step: an infra operator runs
-# aiaiaiai-org/infra "Deploy workload" with the image and envelope digests this run prints.
+# Publishes a production release image for market-trading-lab and its collectors without
+# any infra credential. Trading Lab is part of production Market: its token and database
+# URL come from Core's envelope (infra runtime.secretsFrom), so this publishes no secrets.
+# Activation stays a separate, manual step: an infra operator runs aiaiaiai-org/infra
+# "Deploy workload" with the image digest this run prints.
 name: Publish Trading Lab production release
 
 on:
@@ -71,99 +73,21 @@ jobs:
           subject-digest: ${{ steps.image.outputs.digest }}
           push-to-registry: true
 
-      # Two envelopes, because infra admits into a container exactly the names its contract
-      # maps: the service gets its token and the research database, the collectors only the
-      # database. The database URL is derived here from the one password this Environment
-      # holds, so the URL and the role created with that password cannot drift.
-      - name: Encrypt the production secrets to the edge-prod-1 recipient
-        env:
-          TRADING_LAB_SERVICE_TOKEN: ${{ secrets.TRADING_LAB_SERVICE_TOKEN }}
-          TRADING_LAB_POSTGRES_PASSWORD: ${{ secrets.TRADING_LAB_POSTGRES_PASSWORD }}
-        run: |
-          set -Eeuo pipefail
-          umask 077
-          for name in TRADING_LAB_SERVICE_TOKEN TRADING_LAB_POSTGRES_PASSWORD; do
-            value="${!name}"
-            [[ -n "$value" && "$value" != *$'\n'* && "$value" != *$'\r'* ]] || {
-              echo "::error::$name is missing or multiline in the production Environment." >&2
-              exit 1
-            }
-          done
-          password="$(jq -rn --arg value "$TRADING_LAB_POSTGRES_PASSWORD" '$value | @uri')"
-          database_url="postgres://trading_lab:${password}@market-postgres-production:1927/trading_lab"
-          contract="$(curl -fsSL https://raw.githubusercontent.com/aiaiaiai-org/infra/master/contracts/servers/edge-prod-1.yaml)"
-          recipient="$(sed -n 's/^  encryptionRecipient: //p' <<<"$contract")"
-          [[ "$recipient" =~ ^ssh-ed25519\ [A-Za-z0-9+/]{68}$ ]] || {
-            echo "::error::edge-prod-1 publishes no valid encryptionRecipient." >&2
-            exit 1
-          }
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq age
-          mkdir -p "$RUNNER_TEMP/envelope" "$RUNNER_TEMP/collector-envelope"
-          printf 'TRADING_LAB_SERVICE_TOKEN=%s\nTRADING_LAB_DATABASE_URL=%s\n' "$TRADING_LAB_SERVICE_TOKEN" "$database_url" |
-            age --recipient "$recipient" --output "$RUNNER_TEMP/envelope/secrets.age"
-          printf 'TRADING_LAB_DATABASE_URL=%s\n' "$database_url" |
-            age --recipient "$recipient" --output "$RUNNER_TEMP/collector-envelope/secrets.age"
-          for dir in envelope collector-envelope; do
-            test -s "$RUNNER_TEMP/$dir/secrets.age"
-            printf 'FROM scratch\nCOPY secrets.age /secrets.age\n' > "$RUNNER_TEMP/$dir/Dockerfile"
-          done
-          echo "ENVELOPE_CONTEXT=$RUNNER_TEMP/envelope" >> "$GITHUB_ENV"
-          echo "COLLECTOR_ENVELOPE_CONTEXT=$RUNNER_TEMP/collector-envelope" >> "$GITHUB_ENV"
-
-      - name: Publish the secret envelope
-        id: envelope
-        uses: docker/build-push-action@v6
-        with:
-          context: ${{ env.ENVELOPE_CONTEXT }}
-          platforms: linux/amd64
-          push: true
-          provenance: false
-          tags: ${{ env.IMAGE }}:production-${{ github.sha }}.secrets
-
-      - name: Attest the secret envelope
-        uses: actions/attest-build-provenance@v2
-        with:
-          subject-name: ${{ env.IMAGE }}
-          subject-digest: ${{ steps.envelope.outputs.digest }}
-          push-to-registry: true
-
-      - name: Publish the collector secret envelope
-        id: collector-envelope
-        uses: docker/build-push-action@v6
-        with:
-          context: ${{ env.COLLECTOR_ENVELOPE_CONTEXT }}
-          platforms: linux/amd64
-          push: true
-          provenance: false
-          tags: ${{ env.IMAGE }}:production-${{ github.sha }}.collector.secrets
-
-      - name: Attest the collector secret envelope
-        uses: actions/attest-build-provenance@v2
-        with:
-          subject-name: ${{ env.IMAGE }}
-          subject-digest: ${{ steps.collector-envelope.outputs.digest }}
-          push-to-registry: true
-
       - name: Print the manual activation inputs
         env:
           IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
-          ENVELOPE_DIGEST: ${{ steps.envelope.outputs.digest }}
-          COLLECTOR_ENVELOPE_DIGEST: ${{ steps.collector-envelope.outputs.digest }}
         run: |
           set -Eeuo pipefail
-          for digest in "$IMAGE_DIGEST" "$ENVELOPE_DIGEST" "$COLLECTOR_ENVELOPE_DIGEST"; do
-            [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
-          done
+          [[ "$IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
           {
             echo "### Trading Lab production release candidate"
             echo
-            echo "Activate by hand in aiaiaiai-org/infra → Actions → **Deploy workload** (branch master), once per row:"
+            echo "Activate by hand in aiaiaiai-org/infra → Actions → **Deploy workload** (branch master), once per row,"
+            echo "with \`secrets_image\` left empty: infra takes Trading Lab's secrets from Core's delivered envelope."
             echo
-            echo "| workload | image | secrets_image |"
-            echo "| --- | --- | --- |"
-            echo "| \`market-trading-lab\` | \`$IMAGE@$IMAGE_DIGEST\` | \`$IMAGE@$ENVELOPE_DIGEST\` |"
-            echo "| \`market-trading-lab-okx-collector\` | \`$IMAGE@$IMAGE_DIGEST\` | \`$IMAGE@$COLLECTOR_ENVELOPE_DIGEST\` |"
-            echo
-            echo "The collector envelope also serves the Telegram collector once infra defines it with a channel list."
+            echo "| workload | image |"
+            echo "| --- | --- |"
+            for workload in market-trading-lab market-trading-lab-okx-collector; do
+              echo "| \`$workload\` | \`$IMAGE@$IMAGE_DIGEST\` |"
+            done
           } >> "$GITHUB_STEP_SUMMARY"

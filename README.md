@@ -110,7 +110,7 @@ Set `TRADING_LAB_DATABASE_URL` to a `postgres://` URL and the service keeps a hi
 
 The store holds paper results only: no balance, order or credential. It uses the `pg` gem, whose platform gem ships its own `libpq`, so the image needs no extra package.
 
-**Where it runs.** Production only, on 0xda-market's own PostgreSQL: database and role `trading_lab` in `market-postgres-production` on edge-prod-1, separate from Core's `market` database (see *Production release via infra*). Development has no database and keeps simulating without history: it ships every `master` commit automatically and migrates at boot, so with a database it would migrate the only real research data with unreleased code.
+**Where it runs.** Production only, on 0xda-market's own PostgreSQL: the `trading_lab` schema inside Market's `market` database, reached with Core's credentials (see *Production release via infra*). Development has no database and keeps simulating without history: it ships every `master` commit automatically and migrates at boot, so with a database it would migrate production Market data with unreleased code.
 
 ## Market data collector (OKX, read-only)
 
@@ -165,21 +165,18 @@ TRADING_LAB_DATABASE_URL=postgres://... bundle exec ruby bin/trading-lab collect
 - A small `rated` count says little; the table reports it so the accuracy is never read without it.
 - The page markup is Telegram's and can change. A post without a timestamp fails loudly instead of being stored half-read.
 
-**Where it runs.** In production only, next to the market collector, once a channel list is chosen: infra then defines `market-trading-lab-telegram-collector` with `TRADING_LAB_TELEGRAM_CHANNELS`, using the same collector envelope. Its host must be able to reach `t.me`.
+**Where it runs.** In production only, next to the market collector, once a channel list is chosen: infra then defines `market-trading-lab-telegram-collector` with `TRADING_LAB_TELEGRAM_CHANNELS`, taking the database URL from Core's envelope like the market collector. Its host must be able to reach `t.me`.
 
 ## Production release via infra
 
 The canonical repository is [`0xda-market/trading-lab`](https://github.com/0xda-market/trading-lab), with default branch `master`. Production is **manual-only** and takes two separate steps. This repository holds no infra token.
 
-1. **Publish.** Run *Publish Trading Lab production release* (`deploy-production.yml`, `workflow_dispatch` on `master`) in Environment `production`. It requires a successful push Full CI for the exact SHA. It then:
-   - pushes and attests `ghcr.io/0xda-market/trading-lab:production-<sha>`;
-   - derives `TRADING_LAB_DATABASE_URL` (`postgres://trading_lab:<password>@market-postgres-production:1927/trading_lab`, password URL-encoded) from `TRADING_LAB_POSTGRES_PASSWORD`, so the URL and the role cannot drift;
-   - encrypts two envelopes with `age` to the `edge-prod-1` `encryptionRecipient` from `aiaiaiai-org/infra`: `:production-<sha>.secrets` with `TRADING_LAB_SERVICE_TOKEN` and `TRADING_LAB_DATABASE_URL` for the service, and `:production-<sha>.collector.secrets` with only `TRADING_LAB_DATABASE_URL` for the collectors. Infra admits exactly the names a contract maps, so each workload gets only what it uses;
-   - pushes and attests the image and both envelopes, and prints one activation row per workload.
-2. **Activate.** An infra operator runs `aiaiaiai-org/infra` **Deploy workload** once per printed row (`market-trading-lab`, then `market-trading-lab-okx-collector`). Infra decrypts an envelope only inside its `edge-prod-1` job, then activates the workload and checks its health.
+1. **Publish.** Run *Publish Trading Lab production release* (`deploy-production.yml`, `workflow_dispatch` on `master`) in Environment `production`. It requires a successful push Full CI for the exact SHA, then pushes and attests `ghcr.io/0xda-market/trading-lab:production-<sha>` and prints one activation row per workload. It publishes no secrets.
+2. **Activate.** An infra operator runs `aiaiaiai-org/infra` **Deploy workload** with that image for `market-trading-lab`, then for `market-trading-lab-okx-collector`, leaving `secrets_image` empty. Both take their secrets from Core's last delivered envelope, decrypted only inside infra's `edge-prod-1` job.
 
-- Producer Environment `production` holds `TRADING_LAB_SERVICE_TOKEN` and `TRADING_LAB_POSTGRES_PASSWORD` (random, at least 32 bytes, used nowhere else). No product SSH secrets: `edge-prod-1` owns `SSH_*`. The package is public, so infra pulls it without registry credentials.
-- The service migrates the research schema at boot and refuses to start when the database is unreachable, so `market-postgres-production` and the `trading_lab` role must exist before the first release that carries the URL. Infra's one-time provisioning is described in its `docs/market-trading-lab.md`.
+- **No production secret here.** Trading Lab is part of production Market. Its contracts use `runtime.secretsFrom: market-api-production`: the service receives `TRADING_LAB_SERVICE_TOKEN` and Market's `MARKET_DATABASE_URL` as `TRADING_LAB_DATABASE_URL`, the collector only the URL. The token lives in `0xda-market/core`'s production Environment. No product SSH secrets: `edge-prod-1` owns `SSH_*`. The package is public, so infra pulls it without registry credentials.
+- **Database.** Market's own PostgreSQL (`market-postgres-production`), the `market` database, with Market's role. Trading Lab keeps its tables in the `trading_lab` schema and Core keeps its own in `market`, so the two migration histories never meet. Schema separation is not an access boundary: Trading Lab runs with Market's database rights.
+- **Order.** The service migrates its schema at boot and refuses to start without its database, so it is activated only after Market's production database and Core's delivery are live.
 - Workload: `market-trading-lab`, private Docker alias `market-trading-lab` on `nilx-edge`, port `1927`, no public route. Health check: `GET /health`. Replay and leaderboard require the bearer token.
 - A production Telegram bot would hold `TRADING_LAB_TOKEN` (equal to the service token) and `TRADING_LAB_ORIGIN=http://market-trading-lab:1927`. That bot wiring is a separate, reviewed change.
 
