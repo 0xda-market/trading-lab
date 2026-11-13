@@ -1,9 +1,11 @@
 # © 2026 aiaiaiai · aiaiaiai.org
 # SPDX-License-Identifier: MIT
 
-# Publishes a production release candidate for workload market-trading-lab without any
-# infra credential. Activation stays a separate, manual step: an infra operator runs
-# aiaiaiai-org/infra "Deploy workload" with the image and envelope digests this run prints.
+# Publishes a production release image for market-trading-lab and its collectors without
+# any infra credential. Trading Lab is part of production Market: its token and database
+# URL come from Core's envelope (infra runtime.secretsFrom), so this publishes no secrets.
+# Activation stays a separate, manual step: an infra operator runs aiaiaiai-org/infra
+# "Deploy workload" with the image digest this run prints.
 name: Publish Trading Lab production release
 
 on:
@@ -71,63 +73,25 @@ jobs:
           subject-digest: ${{ steps.image.outputs.digest }}
           push-to-registry: true
 
-      - name: Encrypt the production service token to the edge-prod-1 recipient
-        env:
-          TRADING_LAB_SERVICE_TOKEN: ${{ secrets.TRADING_LAB_SERVICE_TOKEN }}
-        run: |
-          set -Eeuo pipefail
-          umask 077
-          [[ -n "$TRADING_LAB_SERVICE_TOKEN" && "$TRADING_LAB_SERVICE_TOKEN" != *$'\n'* && "$TRADING_LAB_SERVICE_TOKEN" != *$'\r'* ]] || {
-            echo "::error::TRADING_LAB_SERVICE_TOKEN is missing or multiline in the production Environment." >&2
-            exit 1
-          }
-          contract="$(curl -fsSL https://raw.githubusercontent.com/aiaiaiai-org/infra/master/contracts/servers/edge-prod-1.yaml)"
-          recipient="$(sed -n 's/^  encryptionRecipient: //p' <<<"$contract")"
-          [[ "$recipient" =~ ^ssh-ed25519\ [A-Za-z0-9+/]{68}$ ]] || {
-            echo "::error::edge-prod-1 publishes no valid encryptionRecipient." >&2
-            exit 1
-          }
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq age
-          mkdir -p "$RUNNER_TEMP/envelope"
-          printf 'TRADING_LAB_SERVICE_TOKEN=%s\n' "$TRADING_LAB_SERVICE_TOKEN" |
-            age --recipient "$recipient" --output "$RUNNER_TEMP/envelope/secrets.age"
-          test -s "$RUNNER_TEMP/envelope/secrets.age"
-          printf 'FROM scratch\nCOPY secrets.age /secrets.age\n' > "$RUNNER_TEMP/envelope/Dockerfile"
-          echo "ENVELOPE_CONTEXT=$RUNNER_TEMP/envelope" >> "$GITHUB_ENV"
-
-      - name: Publish the secret envelope
-        id: envelope
-        uses: docker/build-push-action@v6
-        with:
-          context: ${{ env.ENVELOPE_CONTEXT }}
-          platforms: linux/amd64
-          push: true
-          provenance: false
-          tags: ${{ env.IMAGE }}:production-${{ github.sha }}.secrets
-
-      - name: Attest the secret envelope
-        uses: actions/attest-build-provenance@v2
-        with:
-          subject-name: ${{ env.IMAGE }}
-          subject-digest: ${{ steps.envelope.outputs.digest }}
-          push-to-registry: true
-
       - name: Print the manual activation inputs
         env:
           IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
-          ENVELOPE_DIGEST: ${{ steps.envelope.outputs.digest }}
         run: |
           set -Eeuo pipefail
-          [[ "$IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ && "$ENVELOPE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "$IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
           {
             echo "### Trading Lab production release candidate"
             echo
-            echo "Activate by hand in aiaiaiai-org/infra → Actions → **Deploy workload** (branch master):"
+            echo "Activate by hand in aiaiaiai-org/infra → Actions → **Deploy workload** (branch master), once per row,"
+            echo "with \`secrets_image\` left empty: infra takes Trading Lab's secrets from Core's delivered envelope."
             echo
-            echo "| input | value |"
+            echo "**Do not activate until** production PostgreSQL and Core delivery are healthy,"
+            echo "off-host backup/restore has been verified, and infra/master defines both workload contracts"
+            echo "with runtime.secretsFrom: market-api-production. A published image is not a deployment."
+            echo
+            echo "| workload | image |"
             echo "| --- | --- |"
-            echo "| workload | \`market-trading-lab\` |"
-            echo "| image | \`$IMAGE@$IMAGE_DIGEST\` |"
-            echo "| secrets_image | \`$IMAGE@$ENVELOPE_DIGEST\` |"
+            for workload in market-trading-lab market-trading-lab-okx-collector; do
+              echo "| \`$workload\` | \`$IMAGE@$IMAGE_DIGEST\` |"
+            done
           } >> "$GITHUB_STEP_SUMMARY"

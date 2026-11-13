@@ -110,7 +110,7 @@ Set `TRADING_LAB_DATABASE_URL` to a `postgres://` URL and the service keeps a hi
 
 The store holds paper results only: no balance, order or credential. It uses the `pg` gem, whose platform gem ships its own `libpq`, so the image needs no extra package.
 
-**Not deployed yet.** Neither infra workload sets `TRADING_LAB_DATABASE_URL`, so development and production keep running without persistence until a database is allocated in `aiaiaiai-org/infra` and the variable is added to the secret envelope. That is a separate, reviewed change.
+**Planned production runtime (not yet activated).** The research store will use 0xda-market's own PostgreSQL: the `trading_lab` schema inside Market's `market` database, reached with Core's credentials (see *Production release via infra*). Development has no database and keeps simulating without history: it ships every `master` commit automatically and migrates at boot, so it must never be pointed at the production database.
 
 ## Market data collector (OKX, read-only)
 
@@ -129,7 +129,7 @@ TRADING_LAB_DATABASE_URL=postgres://... bundle exec ruby bin/trading-lab collect
 - **Database outage.** Ticks wait in memory (up to 20,000) and are written under their own session once the database is back. Past that the collector exits instead of dropping what it observed.
 - **What it is not.** A ticker carries the last trade and the best bid and ask, not every trade and not order book depth. The copy replay still prices from one-minute candles; reading these ticks instead is a separate change.
 
-**Not deployed yet.** The collector needs its own long-running workload (the same image with the command `bundle exec ruby bin/trading-lab collect-okx`) and a database. Both are infra changes.
+**Planned production collector (not yet activated).** Infra must first define and validate `market-trading-lab-okx-collector` (the release image with the command `bundle exec ruby bin/trading-lab collect-okx`); its destination is the Market production research database. At the default sample rate the four instruments can produce about 345,600 rows per day. Retention is not implemented; check disk capacity and backup growth before activation.
 
 ## Telegram signal collector and channel accuracy (read-only)
 
@@ -165,24 +165,22 @@ TRADING_LAB_DATABASE_URL=postgres://... bundle exec ruby bin/trading-lab collect
 - A small `rated` count says little; the table reports it so the accuracy is never read without it.
 - The page markup is Telegram's and can change. A post without a timestamp fails loudly instead of being stored half-read.
 
-**Not deployed yet.** Like the market collector, it needs its own long-running workload and a database, and its host must be allowed to reach `t.me`.
+**Not deployed.** A Telegram collector is a future, separately reviewed production workload. After a channel list is chosen, infra may define `market-trading-lab-telegram-collector` with `TRADING_LAB_TELEGRAM_CHANNELS`, taking the database URL from Core's envelope like the market collector. Its host must be allowed to reach `t.me`.
 
 ## Production release via infra
 
 The canonical repository is [`0xda-market/trading-lab`](https://github.com/0xda-market/trading-lab), with default branch `master`. Production is **manual-only** and takes two separate steps. This repository holds no infra token.
 
-1. **Publish.** Run *Publish Trading Lab production release* (`deploy-production.yml`, `workflow_dispatch` on `master`) in Environment `production`. It requires a successful push Full CI for the exact SHA. It then:
-   - pushes and attests `ghcr.io/0xda-market/trading-lab:production-<sha>`;
-   - encrypts `TRADING_LAB_SERVICE_TOKEN` with `age` to the `edge-prod-1` `encryptionRecipient` from `aiaiaiai-org/infra`;
-   - pushes and attests that envelope as `:production-<sha>.secrets`;
-   - prints both digests.
-2. **Activate.** An infra operator runs `aiaiaiai-org/infra` **Deploy workload** with `workload=market-trading-lab`, the printed `image` and the printed `secrets_image`. Infra decrypts the envelope only inside its `edge-prod-1` job, then activates the workload and checks its health.
+1. **Publish.** Run *Publish Trading Lab production release* (`deploy-production.yml`, `workflow_dispatch` on `master`) in Environment `production`. It requires a successful push Full CI for the exact SHA, then pushes and attests `ghcr.io/0xda-market/trading-lab:production-<sha>` and prints one activation row per workload. It publishes no secrets.
+2. **Activate only after prerequisites are proven.** Check that `market-postgres-production` is healthy, a verified encrypted off-host backup and isolated restore exist, Core has successfully delivered its production envelope, and `infra/master` contains both workload contracts with `runtime.secretsFrom: market-api-production`. Then an infra operator runs `aiaiaiai-org/infra` **Deploy workload** with that immutable image for `market-trading-lab`, verifies `/health` and migration state, and separately deploys `market-trading-lab-okx-collector` after reviewing disk retention exposure. Leave `secrets_image` empty **only after** Core's delivery record is verified; infra resolves and decrypts its envelope inside the `edge-prod-1` job.
 
-- Producer Environment `production` holds only `TRADING_LAB_SERVICE_TOKEN`. No product SSH secrets: `edge-prod-1` owns `SSH_*`. The package is public, so infra pulls it without registry credentials.
+- **No production secret here.** Trading Lab is part of production Market. Its contracts use `runtime.secretsFrom: market-api-production`: the service receives `TRADING_LAB_SERVICE_TOKEN` and Market's `MARKET_DATABASE_URL` as `TRADING_LAB_DATABASE_URL`, the collector only the URL. The token lives in `0xda-market/core`'s production Environment. No product SSH secrets: `edge-prod-1` owns `SSH_*`. The package is public, so infra pulls it without registry credentials.
+- **Database.** Market's own PostgreSQL (`market-postgres-production`), the `market` database, with Market's role. Trading Lab keeps its tables in the `trading_lab` schema and Core keeps its own in `market`, so the two migration histories never meet. Schema separation is not an access boundary: Trading Lab runs with Market's database rights.
+- **Release gate.** Publishing the image is not deployment. Until production Core delivery and the database are verified and `infra/master` declares `runtime.secretsFrom` for the service and collector, neither workload can be activated safely. The service migrates its schema at boot and refuses to start without its database.
 - Workload: `market-trading-lab`, private Docker alias `market-trading-lab` on `nilx-edge`, port `1927`, no public route. Health check: `GET /health`. Replay and leaderboard require the bearer token.
 - A production Telegram bot would hold `TRADING_LAB_TOKEN` (equal to the service token) and `TRADING_LAB_ORIGIN=http://market-trading-lab:1927`. That bot wiring is a separate, reviewed change.
 
-No public DNS, new Telegram credentials, trading API keys or live trading are required. A database is optional (see *Research store*).
+No public DNS, new Telegram credentials, trading API keys or live trading are required.
 
 ## Development delivery (automatic)
 
