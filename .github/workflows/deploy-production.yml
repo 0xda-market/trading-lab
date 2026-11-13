@@ -71,16 +71,26 @@ jobs:
           subject-digest: ${{ steps.image.outputs.digest }}
           push-to-registry: true
 
-      - name: Encrypt the production service token to the edge-prod-1 recipient
+      # Two envelopes, because infra admits into a container exactly the names its contract
+      # maps: the service gets its token and the research database, the collectors only the
+      # database. The database URL is derived here from the one password this Environment
+      # holds, so the URL and the role created with that password cannot drift.
+      - name: Encrypt the production secrets to the edge-prod-1 recipient
         env:
           TRADING_LAB_SERVICE_TOKEN: ${{ secrets.TRADING_LAB_SERVICE_TOKEN }}
+          TRADING_LAB_POSTGRES_PASSWORD: ${{ secrets.TRADING_LAB_POSTGRES_PASSWORD }}
         run: |
           set -Eeuo pipefail
           umask 077
-          [[ -n "$TRADING_LAB_SERVICE_TOKEN" && "$TRADING_LAB_SERVICE_TOKEN" != *$'\n'* && "$TRADING_LAB_SERVICE_TOKEN" != *$'\r'* ]] || {
-            echo "::error::TRADING_LAB_SERVICE_TOKEN is missing or multiline in the production Environment." >&2
-            exit 1
-          }
+          for name in TRADING_LAB_SERVICE_TOKEN TRADING_LAB_POSTGRES_PASSWORD; do
+            value="${!name}"
+            [[ -n "$value" && "$value" != *$'\n'* && "$value" != *$'\r'* ]] || {
+              echo "::error::$name is missing or multiline in the production Environment." >&2
+              exit 1
+            }
+          done
+          password="$(jq -rn --arg value "$TRADING_LAB_POSTGRES_PASSWORD" '$value | @uri')"
+          database_url="postgres://trading_lab:${password}@market-postgres-production:1927/trading_lab"
           contract="$(curl -fsSL https://raw.githubusercontent.com/aiaiaiai-org/infra/master/contracts/servers/edge-prod-1.yaml)"
           recipient="$(sed -n 's/^  encryptionRecipient: //p' <<<"$contract")"
           [[ "$recipient" =~ ^ssh-ed25519\ [A-Za-z0-9+/]{68}$ ]] || {
@@ -89,12 +99,17 @@ jobs:
           }
           sudo apt-get update -qq
           sudo apt-get install -y -qq age
-          mkdir -p "$RUNNER_TEMP/envelope"
-          printf 'TRADING_LAB_SERVICE_TOKEN=%s\n' "$TRADING_LAB_SERVICE_TOKEN" |
+          mkdir -p "$RUNNER_TEMP/envelope" "$RUNNER_TEMP/collector-envelope"
+          printf 'TRADING_LAB_SERVICE_TOKEN=%s\nTRADING_LAB_DATABASE_URL=%s\n' "$TRADING_LAB_SERVICE_TOKEN" "$database_url" |
             age --recipient "$recipient" --output "$RUNNER_TEMP/envelope/secrets.age"
-          test -s "$RUNNER_TEMP/envelope/secrets.age"
-          printf 'FROM scratch\nCOPY secrets.age /secrets.age\n' > "$RUNNER_TEMP/envelope/Dockerfile"
+          printf 'TRADING_LAB_DATABASE_URL=%s\n' "$database_url" |
+            age --recipient "$recipient" --output "$RUNNER_TEMP/collector-envelope/secrets.age"
+          for dir in envelope collector-envelope; do
+            test -s "$RUNNER_TEMP/$dir/secrets.age"
+            printf 'FROM scratch\nCOPY secrets.age /secrets.age\n' > "$RUNNER_TEMP/$dir/Dockerfile"
+          done
           echo "ENVELOPE_CONTEXT=$RUNNER_TEMP/envelope" >> "$GITHUB_ENV"
+          echo "COLLECTOR_ENVELOPE_CONTEXT=$RUNNER_TEMP/collector-envelope" >> "$GITHUB_ENV"
 
       - name: Publish the secret envelope
         id: envelope
@@ -113,21 +128,42 @@ jobs:
           subject-digest: ${{ steps.envelope.outputs.digest }}
           push-to-registry: true
 
+      - name: Publish the collector secret envelope
+        id: collector-envelope
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ env.COLLECTOR_ENVELOPE_CONTEXT }}
+          platforms: linux/amd64
+          push: true
+          provenance: false
+          tags: ${{ env.IMAGE }}:production-${{ github.sha }}.collector.secrets
+
+      - name: Attest the collector secret envelope
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.collector-envelope.outputs.digest }}
+          push-to-registry: true
+
       - name: Print the manual activation inputs
         env:
           IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
           ENVELOPE_DIGEST: ${{ steps.envelope.outputs.digest }}
+          COLLECTOR_ENVELOPE_DIGEST: ${{ steps.collector-envelope.outputs.digest }}
         run: |
           set -Eeuo pipefail
-          [[ "$IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ && "$ENVELOPE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          for digest in "$IMAGE_DIGEST" "$ENVELOPE_DIGEST" "$COLLECTOR_ENVELOPE_DIGEST"; do
+            [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          done
           {
             echo "### Trading Lab production release candidate"
             echo
-            echo "Activate by hand in aiaiaiai-org/infra → Actions → **Deploy workload** (branch master):"
+            echo "Activate by hand in aiaiaiai-org/infra → Actions → **Deploy workload** (branch master), once per row:"
             echo
-            echo "| input | value |"
-            echo "| --- | --- |"
-            echo "| workload | \`market-trading-lab\` |"
-            echo "| image | \`$IMAGE@$IMAGE_DIGEST\` |"
-            echo "| secrets_image | \`$IMAGE@$ENVELOPE_DIGEST\` |"
+            echo "| workload | image | secrets_image |"
+            echo "| --- | --- | --- |"
+            echo "| \`market-trading-lab\` | \`$IMAGE@$IMAGE_DIGEST\` | \`$IMAGE@$ENVELOPE_DIGEST\` |"
+            echo "| \`market-trading-lab-okx-collector\` | \`$IMAGE@$IMAGE_DIGEST\` | \`$IMAGE@$COLLECTOR_ENVELOPE_DIGEST\` |"
+            echo
+            echo "The collector envelope also serves the Telegram collector once infra defines it with a channel list."
           } >> "$GITHUB_STEP_SUMMARY"

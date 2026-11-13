@@ -110,7 +110,7 @@ Set `TRADING_LAB_DATABASE_URL` to a `postgres://` URL and the service keeps a hi
 
 The store holds paper results only: no balance, order or credential. It uses the `pg` gem, whose platform gem ships its own `libpq`, so the image needs no extra package.
 
-**Not deployed yet.** Neither infra workload sets `TRADING_LAB_DATABASE_URL`, so development and production keep running without persistence until a database is allocated in `aiaiaiai-org/infra` and the variable is added to the secret envelope. That is a separate, reviewed change.
+**Where it runs.** Production only, on 0xda-market's own PostgreSQL: database and role `trading_lab` in `market-postgres-production` on edge-prod-1, separate from Core's `market` database (see *Production release via infra*). Development has no database and keeps simulating without history: it ships every `master` commit automatically and migrates at boot, so with a database it would migrate the only real research data with unreleased code.
 
 ## Market data collector (OKX, read-only)
 
@@ -129,7 +129,7 @@ TRADING_LAB_DATABASE_URL=postgres://... bundle exec ruby bin/trading-lab collect
 - **Database outage.** Ticks wait in memory (up to 20,000) and are written under their own session once the database is back. Past that the collector exits instead of dropping what it observed.
 - **What it is not.** A ticker carries the last trade and the best bid and ask, not every trade and not order book depth. The copy replay still prices from one-minute candles; reading these ticks instead is a separate change.
 
-**Not deployed yet.** The collector needs its own long-running workload (the same image with the command `bundle exec ruby bin/trading-lab collect-okx`) and a database. Both are infra changes.
+**Where it runs.** In production only, as the infra workload `market-trading-lab-okx-collector` (the release image with the command `bundle exec ruby bin/trading-lab collect-okx`), writing to the production research database.
 
 ## Telegram signal collector and channel accuracy (read-only)
 
@@ -165,7 +165,7 @@ TRADING_LAB_DATABASE_URL=postgres://... bundle exec ruby bin/trading-lab collect
 - A small `rated` count says little; the table reports it so the accuracy is never read without it.
 - The page markup is Telegram's and can change. A post without a timestamp fails loudly instead of being stored half-read.
 
-**Not deployed yet.** Like the market collector, it needs its own long-running workload and a database, and its host must be allowed to reach `t.me`.
+**Where it runs.** In production only, next to the market collector, once a channel list is chosen: infra then defines `market-trading-lab-telegram-collector` with `TRADING_LAB_TELEGRAM_CHANNELS`, using the same collector envelope. Its host must be able to reach `t.me`.
 
 ## Production release via infra
 
@@ -173,16 +173,17 @@ The canonical repository is [`0xda-market/trading-lab`](https://github.com/0xda-
 
 1. **Publish.** Run *Publish Trading Lab production release* (`deploy-production.yml`, `workflow_dispatch` on `master`) in Environment `production`. It requires a successful push Full CI for the exact SHA. It then:
    - pushes and attests `ghcr.io/0xda-market/trading-lab:production-<sha>`;
-   - encrypts `TRADING_LAB_SERVICE_TOKEN` with `age` to the `edge-prod-1` `encryptionRecipient` from `aiaiaiai-org/infra`;
-   - pushes and attests that envelope as `:production-<sha>.secrets`;
-   - prints both digests.
-2. **Activate.** An infra operator runs `aiaiaiai-org/infra` **Deploy workload** with `workload=market-trading-lab`, the printed `image` and the printed `secrets_image`. Infra decrypts the envelope only inside its `edge-prod-1` job, then activates the workload and checks its health.
+   - derives `TRADING_LAB_DATABASE_URL` (`postgres://trading_lab:<password>@market-postgres-production:1927/trading_lab`, password URL-encoded) from `TRADING_LAB_POSTGRES_PASSWORD`, so the URL and the role cannot drift;
+   - encrypts two envelopes with `age` to the `edge-prod-1` `encryptionRecipient` from `aiaiaiai-org/infra`: `:production-<sha>.secrets` with `TRADING_LAB_SERVICE_TOKEN` and `TRADING_LAB_DATABASE_URL` for the service, and `:production-<sha>.collector.secrets` with only `TRADING_LAB_DATABASE_URL` for the collectors. Infra admits exactly the names a contract maps, so each workload gets only what it uses;
+   - pushes and attests the image and both envelopes, and prints one activation row per workload.
+2. **Activate.** An infra operator runs `aiaiaiai-org/infra` **Deploy workload** once per printed row (`market-trading-lab`, then `market-trading-lab-okx-collector`). Infra decrypts an envelope only inside its `edge-prod-1` job, then activates the workload and checks its health.
 
-- Producer Environment `production` holds only `TRADING_LAB_SERVICE_TOKEN`. No product SSH secrets: `edge-prod-1` owns `SSH_*`. The package is public, so infra pulls it without registry credentials.
+- Producer Environment `production` holds `TRADING_LAB_SERVICE_TOKEN` and `TRADING_LAB_POSTGRES_PASSWORD` (random, at least 32 bytes, used nowhere else). No product SSH secrets: `edge-prod-1` owns `SSH_*`. The package is public, so infra pulls it without registry credentials.
+- The service migrates the research schema at boot and refuses to start when the database is unreachable, so `market-postgres-production` and the `trading_lab` role must exist before the first release that carries the URL. Infra's one-time provisioning is described in its `docs/market-trading-lab.md`.
 - Workload: `market-trading-lab`, private Docker alias `market-trading-lab` on `nilx-edge`, port `1927`, no public route. Health check: `GET /health`. Replay and leaderboard require the bearer token.
 - A production Telegram bot would hold `TRADING_LAB_TOKEN` (equal to the service token) and `TRADING_LAB_ORIGIN=http://market-trading-lab:1927`. That bot wiring is a separate, reviewed change.
 
-No public DNS, new Telegram credentials, trading API keys or live trading are required. A database is optional (see *Research store*).
+No public DNS, new Telegram credentials, trading API keys or live trading are required.
 
 ## Development delivery (automatic)
 
