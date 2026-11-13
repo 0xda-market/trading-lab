@@ -85,6 +85,10 @@ jobs:
             echo "Activate by hand in aiaiaiai-org/infra → Actions → **Deploy workload** (branch master), once per row,"
             echo "with \`secrets_image\` left empty: infra takes Trading Lab's secrets from Core's delivered envelope."
             echo
+            echo "**Do not activate until** production PostgreSQL and Core delivery are healthy,"
+            echo "off-host backup/restore has been verified, and infra/master defines both workload contracts"
+            echo "with runtime.secretsFrom: market-api-production. A published image is not a deployment."
+            echo
             echo "| workload | image |"
             echo "| --- | --- |"
             for workload in market-trading-lab market-trading-lab-okx-collector; do
