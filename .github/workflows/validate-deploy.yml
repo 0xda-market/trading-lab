@@ -33,6 +33,8 @@ jobs:
             sleep 1
           done
           test "$healthy" = true
+          # Infra starts production without DEPLOY_ENV: its health document must not change.
+          test "$(curl --fail --silent --show-error http://127.0.0.1:1927/health)" = '{"status":"ok"}'
           test "$(curl -s -o /dev/null -w '%{http_code}' \
             -X POST http://127.0.0.1:1927/v1/paper/replays \
             -H 'Content-Type: application/json' -d '{"events":[]}')" = 401
@@ -41,3 +43,41 @@ jobs:
             -H 'Content-Type: application/json' \
             -d '{"events":[]}' http://127.0.0.1:1927/v1/paper/replays |
             jq -e '.status == "ok" and (.data.fills | length) == 0'
+      - name: Validate the Render development configuration, without activation
+        run: |
+          set -Eeuo pipefail
+          # The same variables render.yaml declares, with a CI-only token in place of the
+          # one Render generates. Nothing is published or deployed.
+          docker run --detach --name trading-lab-development \
+            -p 127.0.0.1:10000:10000 -e DEPLOY_ENV=development -e PORT=10000 \
+            -e TRADING_LAB_SERVICE_TOKEN=ci-only-secret market-trading-lab:validate
+          trap 'docker logs trading-lab-development || true; docker rm -f trading-lab-development || true' EXIT
+          healthy=false
+          for i in $(seq 1 30); do
+            if curl --fail --silent --show-error http://127.0.0.1:10000/health >/dev/null 2>&1; then
+              healthy=true
+              break
+            fi
+            sleep 1
+          done
+          test "$healthy" = true
+          test "$(curl --fail --silent --show-error http://127.0.0.1:10000/health)" = '{"status":"ok","environment":"development"}'
+          test "$(curl -s -o /dev/null -w '%{http_code}' \
+            -X POST http://127.0.0.1:10000/v1/paper/replays \
+            -H 'Content-Type: application/json' -d '{"events":[]}')" = 401
+          curl --fail --silent --show-error \
+            -H 'Authorization: Bearer ci-only-secret' \
+            -H 'Content-Type: application/json' \
+            -d '{"events":[]}' http://127.0.0.1:10000/v1/paper/replays |
+            jq -e '.status == "ok" and (.data.fills | length) == 0'
+          # A target that is not development or production must stop the boot. Exit 124 is
+          # the timeout: the service was still running, which is the failure this guards.
+          status=0
+          timeout 60 docker run --rm --name trading-lab-unknown-target \
+            -e DEPLOY_ENV=preview -e TRADING_LAB_SERVICE_TOKEN=ci-only-secret \
+            market-trading-lab:validate >/dev/null 2>&1 || status=$?
+          docker rm -f trading-lab-unknown-target >/dev/null 2>&1 || true
+          if [[ "$status" -eq 0 || "$status" -eq 124 ]]; then
+            echo "::error::An unknown DEPLOY_ENV started the service." >&2
+            exit 1
+          fi

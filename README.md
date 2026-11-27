@@ -167,6 +167,35 @@ TRADING_LAB_DATABASE_URL=postgres://... bundle exec ruby bin/trading-lab collect
 
 **Not deployed.** A Telegram collector is a future, separately reviewed production workload. After a channel list is chosen, infra may define `market-trading-lab-telegram-collector` with `TRADING_LAB_TELEGRAM_CHANNELS`, taking the database URL from Core's envelope like the market collector. Its host must be allowed to reach `t.me`.
 
+## Deployment targets
+
+Trading Lab never calls Telegram and holds no bot token. A bot calls it, and two values on the bot's side decide which Trading Lab that is: `TRADING_LAB_ORIGIN`, the address of one target, and `TRADING_LAB_TOKEN`, equal to that target's `TRADING_LAB_SERVICE_TOKEN`. Each target has its own address and its own token, so a bot can only reach the Trading Lab it was given.
+
+| Target | `DEPLOY_ENV` | Bot | Origin the bot uses | How it is deployed |
+| --- | --- | --- | --- | --- |
+| Development on Render | `development` | TEST bot on Render | the service's `https://….onrender.com` URL | `render.yaml`, by hand in Render |
+| Development on infra | not set | `market-bot-test` | `http://market-trading-lab-development:1703` | `publish-development` in `ci.yml`, then infra |
+| Production on infra | not set | `market-bot-production` | `http://market-trading-lab:1927` | `deploy-production.yml`, then infra, both by hand |
+
+`DEPLOY_ENV` names the target a service process was started for: `development` or `production`, the same variable Core and the bot use. It is optional. With it, `GET /health` returns `{"status":"ok","environment":"development"}`, so an origin can be checked before a bot is given its token; without it the answer stays `{"status":"ok"}`. Any other value stops the boot. `RACK_ENV` is not the target: the image always runs Rack and Puma in production mode.
+
+The infra contracts for both infra targets place them on `edge-prod-1`, which `aiaiaiai-org/infra` marked `state: retired` on 2026-11-26. Until those contracts move to a live server infra neither delivers nor deploys them, and its reconciler reports `placed on retired server edge-prod-1; not delivered`. The development environment that runs is the one on Render.
+
+## Development on Render (TEST bot)
+
+`render.yaml` is a Render Blueprint for one Docker web service, `0xda-market-test-trading-lab`: the Trading Lab of the 0xda-market development environment, called by the TEST Telegram bot that also runs on Render. It is the only target with a public address, because a bot on Render cannot reach a private Docker alias on infra. This repository cannot create or deploy it; an operator does, in the Render Dashboard:
+
+1. In the Render account of the test environment, create a Blueprint from `0xda-market/trading-lab`, branch `master`. Render builds the repository `Dockerfile` and starts the service once. After that nothing deploys on a push or a merge (`autoDeployTrigger: "off"`): to update, start a manual deploy of a `master` commit whose Full CI passed.
+2. Render generates `TRADING_LAB_SERVICE_TOKEN` when it creates the service. The token is never in Git, in a GitHub secret or in a workflow.
+3. Check the service: `GET https://<service>.onrender.com/health` must return `{"status":"ok","environment":"development"}`.
+4. On the TEST bot's Render service, set `TRADING_LAB_ORIGIN` to that `https://` URL and `TRADING_LAB_TOKEN` to the generated token, copied inside the Render Dashboard, then redeploy the bot. The bot refuses to start with only one of the two. It accepts any `https://` origin, so it needs no code change.
+
+Limits of this target:
+- **Public, token only.** Everything except `/health` needs the bearer token, the service is paper-only and it holds no other credential. Keep the generated 256-bit token; a short hand-made one would be the only barrier in front of the API.
+- **Development values only.** Never give this origin or token to the production bot, and never give the TEST bot production's.
+- **No database.** The Blueprint declares no `TRADING_LAB_DATABASE_URL`. Do not add one in the Dashboard: the service migrates whatever database it is given at boot.
+- **Idle spin-down.** The `free` plan stops an idle service. The first call after that waits for a cold start that is longer than the bot's read timeout (8 seconds, 12 for a copy replay), so the Mini App can show `trading_lab_unavailable` once and work on the next try.
+
 ## Production release via infra
 
 The canonical repository is [`0xda-market/trading-lab`](https://github.com/0xda-market/trading-lab), with default branch `master`. Production is **manual-only** and takes two separate steps. This repository holds no infra token.

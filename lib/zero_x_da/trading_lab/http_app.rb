@@ -12,6 +12,7 @@ require_relative "copy_quotes"
 require_relative "research_store"
 require_relative "market_tick_store"
 require_relative "telegram_signal_store"
+require_relative "deploy_environment"
 
 module ZeroXDA
   module TradingLab
@@ -31,9 +32,14 @@ module ZeroXDA
 
       def initialize(token: ENV.fetch("TRADING_LAB_SERVICE_TOKEN"), leaders: OkxLeadTraders.new, leaders_cache: LeaderboardCache.new,
                      positions_cache: LeaderboardCache.new(ttl_seconds: 300, max_entries: 32), quotes: CopyQuotes.new,
-                     copies_cache: LeaderboardCache.new(ttl_seconds: 300, max_entries: 32), store: ResearchStore.from_env)
+                     copies_cache: LeaderboardCache.new(ttl_seconds: 300, max_entries: 32), store: ResearchStore.from_env,
+                     environment: DeployEnvironment.from_env)
         raise ArgumentError, "TRADING_LAB_SERVICE_TOKEN is required" if token.to_s.empty?
         @token = token.to_s
+        # /health names the deployment target only when one was declared, so an operator can
+        # tell a development origin from production before giving a bot its token.
+        environment = DeployEnvironment.validate(environment)
+        @health = environment ? { status: "ok", environment: environment } : { status: "ok" }
         @leaders = leaders
         @leaders_cache = leaders_cache
         @positions_cache = positions_cache
@@ -43,7 +49,7 @@ module ZeroXDA
       end
 
       def call(env)
-        return reply(200, status: "ok") if env["REQUEST_METHOD"] == "GET" && env["PATH_INFO"] == "/health"
+        return reply(200, @health) if env["REQUEST_METHOD"] == "GET" && env["PATH_INFO"] == "/health"
         route = [env["REQUEST_METHOD"], env["PATH_INFO"]]
         run_id = route.first == "GET" && RUN_PATH.match(route.last)&.captures&.first
         known = [["POST", REPLAY_PATH], ["GET", LEADERS_PATH], ["POST", COPY_PATH], ["GET", RUNS_PATH],
