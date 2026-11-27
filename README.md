@@ -179,7 +179,7 @@ Trading Lab never calls Telegram and holds no bot token. A bot calls it, and two
 
 `DEPLOY_ENV` names the target a service process was started for: `development` or `production`, the same variable Core and the bot use. It is optional. With it, `GET /health` returns `{"status":"ok","environment":"development"}`, so an origin can be checked before a bot is given its token; without it the answer stays `{"status":"ok"}`. Any other value stops the boot. `RACK_ENV` is not the target: the image always runs Rack and Puma in production mode.
 
-The infra contracts for both infra targets place them on `edge-prod-1`, which `aiaiaiai-org/infra` marked `state: retired` on 2026-11-26. Until those contracts move to a live server infra neither delivers nor deploys them, and its reconciler reports `placed on retired server edge-prod-1; not delivered`. The development environment that runs is the one on Render.
+The infra contracts for both infra targets place them on `edge-prod-1`, which `aiaiaiai-org/infra` marked `state: retired` on 2026-11-26. Until those contracts move to a live server infra neither delivers nor deploys them, and its reconciler reports `placed on retired server edge-prod-1; not delivered`. That leaves Render as the development target that can run.
 
 ## Development on Render (TEST bot)
 
@@ -191,7 +191,7 @@ The infra contracts for both infra targets place them on `edge-prod-1`, which `a
 4. On the TEST bot's Render service, set `TRADING_LAB_ORIGIN` to that `https://` URL and `TRADING_LAB_TOKEN` to the generated token, copied inside the Render Dashboard, then redeploy the bot. The bot refuses to start with only one of the two. It accepts any `https://` origin, so it needs no code change.
 
 Limits of this target:
-- **Public, token only.** Everything except `/health` needs the bearer token, the service is paper-only and it holds no other credential. Keep the generated 256-bit token; a short hand-made one would be the only barrier in front of the API.
+- **Public, token only.** Every API route needs the bearer token and only `/health` answers without it. The service is paper-only and holds no other credential. Keep the generated 256-bit token; a short hand-made one would be the only barrier in front of the API.
 - **Development values only.** Never give this origin or token to the production bot, and never give the TEST bot production's.
 - **No database.** The Blueprint declares no `TRADING_LAB_DATABASE_URL`. Do not add one in the Dashboard: the service migrates whatever database it is given at boot.
 - **Idle spin-down.** The `free` plan stops an idle service. The first call after that waits for a cold start that is longer than the bot's read timeout (8 seconds, 12 for a copy replay), so the Mini App can show `trading_lab_unavailable` once and work on the next try.
