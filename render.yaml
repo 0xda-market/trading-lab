@@ -1,0 +1,27 @@
+# © 2026 aiaiaiai · aiaiaiai.org
+# SPDX-License-Identifier: MIT
+# Manual-only TEST Trading Lab for the 0xda-market development environment on Render: the
+# paper service behind the TEST Telegram bot. No production URL, credential or database is
+# part of this service. Operator steps: README, "Development on Render (TEST bot)".
+services:
+  - type: web
+    name: 0xda-market-test-trading-lab
+    runtime: docker
+    plan: free
+    region: frankfurt
+    branch: master
+    healthCheckPath: /health
+    # Nothing deploys on a push or a merge: every deploy is started by hand in Render.
+    autoDeployTrigger: "off"
+    envVars:
+      - key: DEPLOY_ENV
+        value: development
+      - key: PORT
+        value: "10000"
+      # Render generates this once, when the Blueprint is created; it is never in Git. The
+      # TEST bot holds the same value as TRADING_LAB_TOKEN. On a public origin it is the only
+      # thing between the internet and the paper API, so do not replace it with a short one.
+      - key: TRADING_LAB_SERVICE_TOKEN
+        generateValue: true
+      # No TRADING_LAB_DATABASE_URL: development keeps no research history, and this
+      # service must never be given the production database.
