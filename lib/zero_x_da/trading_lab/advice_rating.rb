@@ -12,6 +12,12 @@ module ZeroXDA
     class AdviceRating
       MINUTE = 60_000
       VERSION = 1
+      # OKX publishes a completed bar slightly after it closes. Until the settle
+      # window passes, missing trailing bars mean "not yet", not "unverified".
+      SETTLE_MS = 2 * MINUTE
+      # Fixed-precision division keeps results identical across bigdecimal versions.
+      BPS = BigDecimal(10_000)
+      PRECISION = 32
       def initialize(candles: OkxCandles.new, clock: -> { Time.now.utc })
         @candles, @clock = candles, clock
       end
@@ -30,7 +36,7 @@ module ZeroXDA
         raise ArgumentError, "invalid levels or costs" unless stop.positive? && stop < low && low <= high && high < target && fee.between?(0, 100) && slip.between?(0, 100)
         first = ((issued.to_r * 1000).floor / MINUTE + 1) * MINUTE
         finish = first + horizon * MINUTE
-        return {"state" => "pending"} if @clock.call.to_r * 1000 < finish
+        return {"state" => "pending"} if @clock.call.to_r * 1000 < finish + SETTLE_MS
         bars = @candles.range(instrument, "1m", first, finish - MINUTE)
         return result("unverified") unless bars.map { |b| b.fetch("start_ms") } == (first...finish).step(MINUTE).to_a
         entry = nil
@@ -39,7 +45,7 @@ module ZeroXDA
           open = bar.fetch("open")
           if entry.nil?
             next unless open.between?(low, high)
-            entry = open * (1 + slip / 10_000)
+            entry = open * (1 + rate(slip))
             # The entry is at the bar open; later intrabar ordering is unknown.
             entry_at = bar.fetch("start_ms")
           end
@@ -52,20 +58,24 @@ module ZeroXDA
           end
         end
         return result("missed") unless entry
-        closed("expired", entry, bars.last.fetch("close"), fee, slip, entry_at, finish)
+        closed("expired", entry, bars.last.fetch("close"), fee, slip, entry_at, bars.last.fetch("start_ms"))
       rescue OkxPublic::UnknownInstrument
         result("unverified")
       end
 
       private
 
+      def rate(bps)
+        bps.div(BPS, PRECISION)
+      end
+
       def result(outcome)
         {"state" => "result", "outcome" => outcome, "rating_version" => VERSION}
       end
 
       def closed(outcome, entry, raw_exit, fee, slip, entry_at, exit_at)
-        exit_price = raw_exit * (1 - slip / 10_000)
-        net = exit_price * (1 - fee / 10_000) / (entry * (1 + fee / 10_000)) - 1
+        exit_price = raw_exit * (1 - rate(slip))
+        net = (exit_price * (1 - rate(fee))).div(entry * (1 + rate(fee)), PRECISION) - 1
         result(outcome).merge("entry_price" => entry.to_s("F"), "exit_price" => exit_price.to_s("F"),
                               "entry_at_ms" => entry_at, "exit_bar_at_ms" => exit_at,
                               "net_return" => net.round(8).to_s("F"))
